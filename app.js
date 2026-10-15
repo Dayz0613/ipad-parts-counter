@@ -89,7 +89,7 @@
 
   function registerWorker() {
     try {
-      worker = new Worker('./detector-worker.js?v=8');
+      worker = new Worker('./detector-worker.js?v=10');
       worker.addEventListener('message', (event) => {
         const { jobId, result, error } = event.data || {};
         if (jobId !== activeJob) return;
@@ -614,7 +614,7 @@
       els.offlineText.textContent = 'HTTPSで開くとオフライン利用可';
       return;
     }
-    navigator.serviceWorker.register('./service-worker.js?v=8').then(() => navigator.serviceWorker.ready).then(() => {
+    navigator.serviceWorker.register('./service-worker.js?v=10').then(() => navigator.serviceWorker.ready).then(() => {
       els.offlineState.classList.add('ready');
       els.offlineText.textContent = 'オフライン利用の準備OK';
     }).catch(() => {

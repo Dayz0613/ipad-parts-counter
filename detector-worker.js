@@ -20,12 +20,19 @@ function detect(rgba, width, height, settings) {
   }
   const baseThreshold = otsuThreshold(histogram, length);
   const reference = settings.reference && settings.reference.area > 0 ? settings.reference : null;
+  const requestedWidth = Math.max(3, Number(settings.targetWidth) || Math.min(width, height) * 0.028);
+  const targetWidth = reference ? Math.max(3, Number(reference.diameter) || 2 * Math.sqrt(reference.area / Math.PI)) : requestedWidth;
   const automatic = !!settings.autoThreshold && !reference;
   const offset = automatic ? 0 : Number(settings.thresholdOffset || 0);
   let threshold = Math.max(0, Math.min(255, baseThreshold + offset));
   let polarity = reference ? reference.polarity : settings.polarity;
   if (automatic) {
-    const optimized = optimizeThreshold(gray, width, height, Number(settings.minArea) || 40, baseThreshold);
+    // The image border is usually tray/background, so use its median brightness
+    // to decide which side of the threshold represents the parts. This avoids
+    // selecting a visually inverted mask just because it creates more blobs.
+    const backgroundLevel = borderMedian(gray, width, height);
+    const expectedPolarity = backgroundLevel > baseThreshold ? 'dark' : 'bright';
+    const optimized = optimizeThreshold(gray, width, height, Number(settings.minArea) || 40, baseThreshold, targetWidth, expectedPolarity);
     threshold = optimized.threshold;
     polarity = optimized.polarity;
   } else if (polarity === 'auto') {
@@ -36,8 +43,6 @@ function detect(rgba, width, height, settings) {
     polarity = occupancyScore(darkRatio) < occupancyScore(brightRatio) ? 'dark' : 'bright';
   }
 
-  const requestedWidth = Math.max(3, Number(settings.targetWidth) || Math.min(width, height) * 0.028);
-  const targetWidth = reference ? Math.max(3, Number(reference.diameter) || 2 * Math.sqrt(reference.area / Math.PI)) : requestedWidth;
   const contrast = reference ? Math.max(7, Math.min(160, Math.abs(reference.meanBackground - reference.meanObject))) : 0;
   const localRadius = reference ? Math.max(6, Math.min(100, Math.round(targetWidth * 1.45))) : 0;
   const integral = reference ? grayscaleIntegral(gray, width, height) : null;
@@ -341,7 +346,7 @@ function detect(rgba, width, height, settings) {
 // intensity resolution. The score favors coherent, repeatable components,
 // rejects foreground that reaches the tray edge, and penalizes speckle and
 // thresholds that turn most of the tray into foreground.
-function optimizeThreshold(gray, width, height, minArea, baseThreshold) {
+function optimizeThreshold(gray, width, height, minArea, baseThreshold, targetWidth, expectedPolarity) {
   const maxEdge = 240;
   const scale = Math.min(1, maxEdge / Math.max(width, height));
   const sampleWidth = Math.max(1, Math.round(width * scale));
@@ -363,16 +368,18 @@ function optimizeThreshold(gray, width, height, minArea, baseThreshold) {
     }
   }
 
-  const sampleMinArea = Math.max(2, Math.round(minArea * scale * scale));
+  const sampleTargetWidth = Math.max(1, targetWidth * scale);
+  const expectedArea = Math.max(minArea, targetWidth * targetWidth * 2.5) * scale * scale;
+  const sampleMinArea = Math.max(2, Math.round(Math.max(minArea * scale * scale, expectedArea * 0.28)));
   const scores = new Map();
   const evaluate = (threshold, candidatePolarity) => {
     const key = `${candidatePolarity}:${threshold}`;
-    if (!scores.has(key)) scores.set(key, scoreThreshold(sample, sampleWidth, sampleHeight, threshold, candidatePolarity, sampleMinArea));
+    if (!scores.has(key)) scores.set(key, scoreThreshold(sample, sampleWidth, sampleHeight, threshold, candidatePolarity, sampleMinArea, sampleTargetWidth));
     return scores.get(key);
   };
 
-  let best = { score: -Infinity, threshold: baseThreshold, polarity: 'dark' };
-  for (const candidatePolarity of ['dark', 'bright']) {
+  let best = { score: -Infinity, threshold: baseThreshold, polarity: expectedPolarity };
+  for (const candidatePolarity of [expectedPolarity]) {
     for (let threshold = 24; threshold <= 232; threshold += 4) {
       const center = evaluate(threshold, candidatePolarity);
       const before = evaluate(Math.max(0, threshold - 4), candidatePolarity);
@@ -393,7 +400,27 @@ function optimizeThreshold(gray, width, height, minArea, baseThreshold) {
   return best;
 }
 
-function scoreThreshold(gray, width, height, threshold, polarity, minArea) {
+function borderMedian(gray, width, height) {
+  const band = Math.max(1, Math.round(Math.min(width, height) * 0.025));
+  const histogram = new Uint32Array(256);
+  let count = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (x >= band && x < width - band && y >= band && y < height - band) continue;
+      histogram[gray[y * width + x]]++;
+      count++;
+    }
+  }
+  const midpoint = Math.floor(count / 2);
+  let accumulated = 0;
+  for (let value = 0; value < histogram.length; value++) {
+    accumulated += histogram[value];
+    if (accumulated > midpoint) return value;
+  }
+  return 127;
+}
+
+function scoreThreshold(gray, width, height, threshold, polarity, minArea, targetWidth) {
   const length = gray.length;
   const raw = new Uint8Array(length);
   for (let i = 0; i < length; i++) {
@@ -406,6 +433,9 @@ function scoreThreshold(gray, width, height, threshold, polarity, minArea) {
   let foreground = 0;
   let borderForeground = 0;
   let tinyForeground = 0;
+  let thinForeground = 0;
+  let soliditySum = 0;
+  let measuredComponents = 0;
   const border = Math.max(1, Math.round(Math.min(width, height) * 0.025));
 
   for (let start = 0; start < length; start++) {
@@ -416,10 +446,18 @@ function scoreThreshold(gray, width, height, threshold, polarity, minArea) {
     labels[start] = 1;
     let touchesBorder = false;
     let edgePixels = 0;
+    let minX = width;
+    let minY = height;
+    let maxX = 0;
+    let maxY = 0;
     while (head < tail) {
       const index = queue[head++];
       const x = index % width;
       const y = (index / width) | 0;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
       if (x < border || y < border || x >= width - border || y >= height - border) {
         touchesBorder = true;
         edgePixels++;
@@ -443,6 +481,13 @@ function scoreThreshold(gray, width, height, threshold, polarity, minArea) {
     if (tail < minArea) tinyForeground += tail;
     else {
       areas.push(tail);
+      const boxWidth = maxX - minX + 1;
+      const boxHeight = maxY - minY + 1;
+      const minorSize = Math.min(boxWidth, boxHeight);
+      const boxArea = boxWidth * boxHeight;
+      if (minorSize < targetWidth * 0.55) thinForeground += tail;
+      soliditySum += Math.min(1, tail / Math.max(1, boxArea));
+      measuredComponents++;
       if (touchesBorder) borderForeground += tail;
     }
   }
@@ -457,14 +502,18 @@ function scoreThreshold(gray, width, height, threshold, polarity, minArea) {
   const logMad = logDeviations[Math.floor(logDeviations.length / 2)];
   const largestShare = areas[areas.length - 1] / Math.max(1, totalValid);
   const tinyRatio = tinyForeground / Math.max(1, foreground);
+  const thinRatio = thinForeground / Math.max(1, totalValid);
   const edgeRatio = borderForeground / Math.max(1, foreground);
   const countReward = Math.min(1.25, Math.log1p(areas.length) / Math.log(9));
   const occupancyPenalty = Math.max(0, occupancy - 0.35) * 3;
+  const meanSolidity = soliditySum / Math.max(1, measuredComponents);
   return 1.8 * countReward
     + 0.35 * (totalValid / Math.max(1, foreground))
     - 2.8 * tinyRatio
+    - 2.2 * thinRatio
     - 5.5 * edgeRatio
     - 0.8 * logMad
+    + 0.6 * meanSolidity
     - 1.8 * Math.max(0, largestShare - 0.3)
     - occupancyPenalty;
 }
