@@ -1,10 +1,10 @@
-const CACHE_NAME = 'parts-counter-shell-v16';
+const CACHE_NAME = 'parts-counter-shell-v17';
 const SHELL_FILES = [
   './',
   './index.html',
   './styles.css?v=7',
-  './app.js?v=16',
-  './detector-worker.js?v=16',
+  './app.js?v=17',
+  './detector-worker.js?v=17',
   './manifest.webmanifest',
   './icon.svg',
   './icon-192.png',
@@ -31,4 +31,3 @@ self.addEventListener('fetch', (event) => {
   }
   event.respondWith(caches.match(request).then((cached) => cached || fetch(request)));
 });
-

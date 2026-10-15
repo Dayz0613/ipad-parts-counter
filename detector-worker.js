@@ -21,8 +21,11 @@ function detect(rgba, width, height, settings) {
   const baseThreshold = otsuThreshold(histogram, length);
   const reference = settings.reference && settings.reference.area > 0 ? settings.reference : null;
   const requestedWidth = Math.max(3, Number(settings.targetWidth) || Math.min(width, height) * 0.028);
-  const targetWidth = reference ? Math.max(3, Number(reference.diameter) || 2 * Math.sqrt(reference.area / Math.PI)) : requestedWidth;
-  const automatic = !!settings.autoThreshold && !reference;
+  const referenceWidth = reference
+    ? Math.max(3, Number(reference.minorAxis) || Number(reference.diameter) || 2 * Math.sqrt(reference.area / Math.PI))
+    : requestedWidth;
+  const targetWidth = requestedWidth;
+  const automatic = !!settings.autoThreshold;
   const offset = automatic ? 0 : Number(settings.thresholdOffset || 0);
   let threshold = Math.max(0, Math.min(255, baseThreshold + offset));
   let polarity = reference ? reference.polarity : settings.polarity;
@@ -30,8 +33,8 @@ function detect(rgba, width, height, settings) {
     // The image border is usually tray/background, so use its median brightness
     // to decide which side of the threshold represents the parts. This avoids
     // selecting a visually inverted mask just because it creates more blobs.
-    const backgroundLevel = borderMedian(gray, width, height);
-    const expectedPolarity = backgroundLevel > baseThreshold ? 'dark' : 'bright';
+    const backgroundLevel = reference ? null : borderMedian(gray, width, height);
+    const expectedPolarity = reference ? reference.polarity : (backgroundLevel > baseThreshold ? 'dark' : 'bright');
     const optimized = optimizeThreshold(gray, width, height, Number(settings.minArea) || 40, baseThreshold, targetWidth, expectedPolarity);
     threshold = optimized.threshold;
     polarity = optimized.polarity;
@@ -44,16 +47,16 @@ function detect(rgba, width, height, settings) {
   }
 
   const contrast = reference ? Math.max(7, Math.min(160, Math.abs(reference.meanBackground - reference.meanObject))) : 0;
-  const localRadius = reference ? Math.max(6, Math.min(100, Math.round(targetWidth * 1.45))) : 0;
+  const localRadius = reference ? Math.max(6, Math.min(100, Math.round(referenceWidth * 1.45))) : 0;
   const integral = reference ? grayscaleIntegral(gray, width, height) : null;
-  if (reference) threshold = Math.max(0, Math.min(255, Math.round((reference.meanObject + reference.meanBackground) / 2 + offset)));
+  if (reference && !automatic) threshold = Math.max(0, Math.min(255, Math.round((reference.meanObject + reference.meanBackground) / 2 + offset)));
 
   const thresholdMask = new Uint8Array(length);
   let thresholdForeground = 0;
   const darkParts = polarity === 'dark';
   for (let i = 0; i < length; i++) {
     let pixelThreshold = threshold;
-    if (reference) {
+    if (reference && !automatic) {
       const x = i % width;
       const y = (i / width) | 0;
       const localMean = localMeanAt(integral, width, height, x, y, localRadius);
@@ -164,6 +167,10 @@ function detect(rgba, width, height, settings) {
     component.aspect = Math.sqrt(eigenMajor / eigenMinor);
     component.majorAxis = 4 * Math.sqrt(eigenMajor);
     component.minorAxis = 4 * Math.sqrt(eigenMinor);
+    component.width = component.maxX - component.minX + 1;
+    component.height = component.maxY - component.minY + 1;
+    component.solidity = Math.min(1, component.area / Math.max(1, component.majorAxis * component.minorAxis));
+    component.holeRatio = enclosedHoleRatio(thresholdMask, width, height, component);
     const pad = Math.max(3, Math.round(targetWidth * 0.28));
     const left = Math.max(0, component.minX - pad);
     const right = Math.min(width - 1, component.maxX + pad);
@@ -184,10 +191,11 @@ function detect(rgba, width, height, settings) {
   const firstPartComponent = components.slice(1).filter(Boolean).reduce((smallest, component) =>
     !smallest || component.area < smallest.area ? component : smallest, null);
   const firstPartArea = firstPartComponent ? firstPartComponent.area : 0;
+  const unitAreaReference = reference ? Number(reference.area) : firstPartArea;
   for (let label = 1; label < components.length; label++) {
     const component = components[label];
-    if (component) component.estimatedQuantity = firstPartArea
-      ? Math.max(1, Math.floor(component.area / firstPartArea + 1e-7))
+    if (component) component.estimatedQuantity = unitAreaReference
+      ? Math.max(1, Math.floor(component.area / unitAreaReference + 1e-7))
       : 1;
   }
 
@@ -258,7 +266,8 @@ function detect(rgba, width, height, settings) {
   candidates.sort((a, b) => b.distance - a.distance);
 
   const buckets = new Map();
-  const minSeparation = Math.max(10, targetWidth * 2.8);
+  const referenceMinorAxis = reference ? Number(reference.minorAxis) : firstPartComponent && firstPartComponent.minorAxis;
+  const minSeparation = Math.max(10, referenceMinorAxis ? referenceMinorAxis * 0.55 : targetWidth * 2.8);
   const minSeparationSquared = minSeparation * minSeparation;
   for (const candidate of candidates) {
     const component = components[candidate.label];
@@ -287,7 +296,8 @@ function detect(rgba, width, height, settings) {
 
   const detections = [];
   let warningCount = 0;
-  const expectedArea = Math.max(9, firstPartArea || (reference ? reference.area : targetWidth * targetWidth * 0.9));
+  const expectedArea = Math.max(9, unitAreaReference || targetWidth * targetWidth * 0.9);
+  const expectedShape = reference || firstPartComponent;
   const componentSummaries = [];
   for (let label = 1; label < components.length; label++) {
     const component = components[label];
@@ -304,8 +314,13 @@ function detect(rgba, width, height, settings) {
     const unusualArea = component.area > expectedArea * (reference ? 1.75 : 2.3);
     const joined = estimatedQuantity > 1 || component.area > expectedArea * 2.3;
     const relativeArea = perItemArea / expectedArea;
-    const shapeRatio = reference ? component.aspect / Math.max(0.15, reference.aspect) : 1;
-    const shapeMismatch = !!reference && (shapeRatio < 0.52 || shapeRatio > 1.9);
+    const shapeRatio = expectedShape ? component.aspect / Math.max(0.15, Number(expectedShape.aspect) || 1) : 1;
+    const expectedSolidity = expectedShape ? Number(expectedShape.solidity) : NaN;
+    const expectedHoleRatio = expectedShape ? Number(expectedShape.holeRatio) : NaN;
+    const solidityDifference = Number.isFinite(expectedSolidity) ? Math.abs(component.solidity - expectedSolidity) : 0;
+    const holeDifference = Number.isFinite(expectedHoleRatio) ? Math.abs(component.holeRatio - expectedHoleRatio) : 0;
+    const shapeMismatch = estimatedQuantity === 1 && !!expectedShape
+      && (shapeRatio < 0.4 || shapeRatio > 2.5 || solidityDifference > 0.32 || (expectedHoleRatio > 0.04 && holeDifference > 0.3));
     if (joined || unusualArea || (reference && (relativeArea < 0.42 || relativeArea > 1.9 || shapeMismatch))) warningCount++;
     componentSummaries.push({
       label,
@@ -320,6 +335,10 @@ function detect(rgba, width, height, settings) {
       aspect: component.aspect,
       majorAxis: component.majorAxis,
       minorAxis: component.minorAxis,
+      width: component.width,
+      height: component.height,
+      solidity: component.solidity,
+      holeRatio: component.holeRatio,
       meanObject: component.meanObject,
       meanBackground: component.meanBackground,
       peakCount: estimatedQuantity,
@@ -345,7 +364,7 @@ function detect(rgba, width, height, settings) {
         maxY: component.maxY,
         angle: component.angle,
         aspect: component.aspect,
-        uncertain: joined || unusualArea || (reference && (relativeArea < 0.42 || relativeArea > 1.9 || shapeMismatch))
+        uncertain: joined || unusualArea || relativeArea < 0.42 || relativeArea > 1.9 || shapeMismatch
       });
     }
   }
@@ -358,6 +377,7 @@ function detect(rgba, width, height, settings) {
     estimatedQuantity: detections.length,
     firstPartLabel: firstPart ? firstPart.label : null,
     firstPartArea: firstPart ? firstPart.area : null,
+    countReferenceArea: unitAreaReference || null,
     threshold,
     polarity,
     autoThresholdUsed: automatic,
@@ -379,7 +399,7 @@ function detect(rgba, width, height, settings) {
     closingFilledPixels: closing.filledPixels + countForeground(filledMask) - countForeground(closing.mask),
     targetWidth,
     referenceUsed: reference ? { area: reference.area } : null,
-    localThreshold: !!reference
+    localThreshold: !!reference && !automatic
   };
 }
 
@@ -417,6 +437,49 @@ function countForeground(mask) {
   let total = 0;
   for (let i = 0; i < mask.length; i++) total += mask[i];
   return total;
+}
+
+// Estimate enclosed holes from the original threshold mask before morphology
+// fills them. The ratio is scale-free and works for washers, nuts, IC outlines,
+// and other shapes without assuming a screw-specific silhouette.
+function enclosedHoleRatio(source, width, height, component) {
+  const left = Math.max(0, component.minX - 1);
+  const right = Math.min(width - 1, component.maxX + 1);
+  const top = Math.max(0, component.minY - 1);
+  const bottom = Math.min(height - 1, component.maxY + 1);
+  const roiWidth = right - left + 1;
+  const roiHeight = bottom - top + 1;
+  if (roiWidth < 3 || roiHeight < 3) return 0;
+  const outside = new Uint8Array(roiWidth * roiHeight);
+  const queue = new Int32Array(outside.length);
+  let head = 0, tail = 0;
+  const add = (x, y) => {
+    const local = y * roiWidth + x;
+    const global = (top + y) * width + left + x;
+    if (!source[global] && !outside[local]) {
+      outside[local] = 1;
+      queue[tail++] = local;
+    }
+  };
+  for (let x = 0; x < roiWidth; x++) { add(x, 0); add(x, roiHeight - 1); }
+  for (let y = 0; y < roiHeight; y++) { add(0, y); add(roiWidth - 1, y); }
+  while (head < tail) {
+    const index = queue[head++];
+    const x = index % roiWidth;
+    const y = (index / roiWidth) | 0;
+    if (x > 0) add(x - 1, y);
+    if (x + 1 < roiWidth) add(x + 1, y);
+    if (y > 0) add(x, y - 1);
+    if (y + 1 < roiHeight) add(x, y + 1);
+  }
+  let holes = 0;
+  for (let y = 1; y < roiHeight - 1; y++) {
+    for (let x = 1; x < roiWidth - 1; x++) {
+      const local = y * roiWidth + x;
+      if (!outside[local] && !source[(top + y) * width + left + x]) holes++;
+    }
+  }
+  return holes / Math.max(1, component.area + holes);
 }
 
 function fillEnclosedHoles(mask, width, height) {
@@ -832,4 +895,3 @@ function otsuThreshold(histogram, total) {
   }
   return threshold;
 }
-

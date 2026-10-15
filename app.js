@@ -89,7 +89,7 @@
 
   function registerWorker() {
     try {
-      worker = new Worker('./detector-worker.js?v=16');
+      worker = new Worker('./detector-worker.js?v=17');
       worker.addEventListener('message', (event) => {
         const { jobId, result, error } = event.data || {};
         if (jobId !== activeJob) return;
@@ -123,8 +123,11 @@
         els.resultBadge.classList.add('ready');
         els.exportButton.disabled = false;
         const level = result.polarity === 'dark' ? '暗い部品' : '明るい部品';
-        const referenceNote = result.referenceUsed ? ` · 基準面積 ${Math.round(result.referenceUsed.area).toLocaleString()} px²・局所2値化` : '';
-        const firstPartNote = result.firstPartArea ? ` · 最小領域 ${Math.round(result.firstPartArea).toLocaleString()} px²を1個基準として面積換算（推定${result.estimatedQuantity}個）` : '';
+        const referenceNote = result.referenceUsed
+          ? ` · 選択形状を基準（面積 ${Math.round(result.referenceUsed.area).toLocaleString()} px²・${result.localThreshold ? '局所二値化' : '明暗方向と面積比に反映'}）`
+          : '';
+        const countReferenceLabel = result.referenceUsed ? '選択した基準部品' : '最小面積の領域';
+        const firstPartNote = result.countReferenceArea ? ` · ${countReferenceLabel} ${Math.round(result.countReferenceArea).toLocaleString()} px²・形状特徴を1個基準として換算（推定${result.estimatedQuantity}個）` : '';
         els.areaCandidateCount.textContent = result.componentCount.toLocaleString();
         const binarization = result.localThreshold ? '局所二値化' : result.autoThresholdUsed ? '自動最適化' : '全体二値化';
         const closingNote = result.closingRadius ? ` · 自動膨張収縮 半径${result.closingRadius}px（領域数の安定から選択）・塗り足し${result.closingFilledPixels.toLocaleString()}画素` : ' · 自動膨張収縮 なし（合体・膨張を避けました）';
@@ -427,18 +430,18 @@
       button.setAttribute('aria-pressed', String(active));
     }
     els.canvas.style.cursor = mode === 'add' ? 'copy' : mode === 'delete' ? 'not-allowed' : mode === 'reference' ? 'crosshair' : 'grab';
-    els.modeHint.textContent = mode === 'add' ? '画像上の部品の中心をタップすると1個追加します。' : mode === 'delete' ? '削除する検出位置をタップします。細かい場所は拡大してください。' : mode === 'reference' ? '緑の検出位置をタップ。単独で写った部品を基準にします。' : '検出位置を拡大して確認できます。';
+      els.modeHint.textContent = mode === 'add' ? '画像上の部品の中心をタップすると1個追加します。' : mode === 'delete' ? '削除する検出位置をタップします。細かい場所は拡大してください。' : mode === 'reference' ? '1個だけ離れて写った自動検出位置をタップして形状基準にします。' : '検出位置を拡大して確認できます。';
   }
 
   function selectReference(x, y) {
     const point = nearestPoint(x, y);
     if (!point || point.source !== '自動検出') {
-      els.statusLine.textContent = '緑色の自動検出位置を選んでください。接触部品や手動追加は基準にできません。';
+      els.statusLine.textContent = '自動検出された、1個だけ離れて写っている部品を選んでください。接触部品や手動追加は基準にできません。';
       return;
     }
     const component = analysisResult && analysisResult.components && analysisResult.components.find((item) => item.label === point.label);
     if (!component || component.peakCount !== 1 || component.area < 8 || component.meanBackground === null) {
-      els.statusLine.textContent = '1個だけ離れて写り、背景との明暗差がある部品を選んでください。黄色の位置は基準に向きません。';
+      els.statusLine.textContent = '1個だけ離れて写り、背景との明暗差がある部品を選んでください。要確認の位置は基準に向きません。';
       return;
     }
     const contrast = Math.abs(component.meanBackground - component.meanObject);
@@ -450,6 +453,12 @@
       area: component.area,
       angle: component.angle,
       aspect: component.aspect,
+      majorAxis: component.majorAxis,
+      minorAxis: component.minorAxis,
+      width: component.width,
+      height: component.height,
+      solidity: component.solidity,
+      holeRatio: component.holeRatio,
       diameter: Math.max(3, 2 * Math.sqrt(component.area / Math.PI)),
       meanObject: component.meanObject,
       meanBackground: component.meanBackground,
@@ -458,7 +467,7 @@
     updateReferenceSummary();
     saveSettings(false);
     setMode('view');
-    els.statusLine.textContent = `基準を記録しました · 面積 ${Math.round(component.area).toLocaleString()} px² · 角度 ${Math.round(component.angle)}°。基準に合わせて全体を再解析します。`;
+    els.statusLine.textContent = `基準を記録しました · 面積 ${Math.round(component.area).toLocaleString()} px² · 寸法 ${component.width}×${component.height} px · 穴の割合 ${(component.holeRatio * 100).toFixed(1)}%。形状基準に合わせて再解析します。`;
     analyze();
   }
 
@@ -480,7 +489,9 @@
       els.clearReferenceButton.disabled = true;
       return;
     }
-    els.referenceSummary.textContent = `基準あり · 面積 ${Math.round(referenceProfile.area).toLocaleString()} px² · 角度 ${Math.round(referenceProfile.angle)}° · 縦横比 ${referenceProfile.aspect.toFixed(2)}`;
+    const holeText = Number(referenceProfile.holeRatio) > 0.04 ? '穴あり' : '穴は検出されず';
+    const dimensions = referenceProfile.width && referenceProfile.height ? ` · 寸法 ${referenceProfile.width}×${referenceProfile.height} px` : '';
+    els.referenceSummary.textContent = `形状基準あり · 面積 ${Math.round(referenceProfile.area).toLocaleString()} px²${dimensions} · 縦横比 ${Number(referenceProfile.aspect || 1).toFixed(2)} · ${holeText}`;
     els.clearReferenceButton.disabled = false;
   }
 
@@ -507,7 +518,7 @@
       els.warningText.textContent = '明暗設定や「明るさの境界」を調整して再解析してください。検出位置が全体に広がっているときは、特に確認が必要です。';
     } else if (warnings > 0) {
       els.warningTitle.textContent = `接触・重なりの可能性がある領域: ${warnings.toLocaleString()}箇所`;
-      els.warningText.textContent = '黄色の位置を拡大して確認してください。最小面積の部品を1個分の基準にして領域面積から換算しています。部品の重なりで見える面積が減ると、数量が少なく見積もられることがあります。';
+      els.warningText.textContent = '黄色の位置を拡大して確認してください。1個の基準部品から面積・寸法・縦横比・穴の特徴を取り、領域の分割位置を推定しています。接触や重なりが強い箇所は誤差が出ることがあります。';
     } else if (analysisResult.candidateLimitReached) {
       els.warningTitle.textContent = '検出候補が多すぎます';
       els.warningText.textContent = '画像にノイズや模様が多く、処理上限に達しました。部品の幅、明暗設定、ノイズ除去を調整して再解析してください。';
@@ -617,7 +628,7 @@
       els.offlineText.textContent = 'HTTPSで開くとオフライン利用可';
       return;
     }
-    navigator.serviceWorker.register('./service-worker.js?v=16').then(() => navigator.serviceWorker.ready).then(() => {
+    navigator.serviceWorker.register('./service-worker.js?v=17').then(() => navigator.serviceWorker.ready).then(() => {
       els.offlineState.classList.add('ready');
       els.offlineText.textContent = 'オフライン利用の準備OK';
     }).catch(() => {
@@ -626,4 +637,3 @@
     });
   }
 })();
-
