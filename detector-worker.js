@@ -29,21 +29,31 @@ function detect(rgba, width, height, settings) {
   const offset = automatic ? 0 : Number(settings.thresholdOffset || 0);
   let threshold = Math.max(0, Math.min(255, baseThreshold + offset));
   let polarity = reference ? reference.polarity : settings.polarity;
-  if (automatic) {
-    // The image border is usually tray/background, so use its median brightness
-    // to decide which side of the threshold represents the parts. This avoids
-    // selecting a visually inverted mask just because it creates more blobs.
+  let partPolarity = polarity;
+  let thresholdGray = gray;
+  const useAdaptiveThreshold = automatic;
+  if (useAdaptiveThreshold) {
+    // Normalize gradual lighting and tray texture before selecting a threshold.
+    // A large local window estimates the nearby background; foreground is the
+    // signed contrast from that background, so the optimizer sees object edges
+    // instead of broad shadows or brightness gradients.
     const backgroundLevel = reference ? null : borderMedian(gray, width, height);
-    const expectedPolarity = reference ? reference.polarity : (backgroundLevel > baseThreshold ? 'dark' : 'bright');
-    const optimized = optimizeThreshold(gray, width, height, Number(settings.minArea) || 40, baseThreshold, targetWidth, expectedPolarity);
+    const expectedPartPolarity = reference ? reference.polarity : (backgroundLevel > baseThreshold ? 'dark' : 'bright');
+    partPolarity = expectedPartPolarity;
+    thresholdGray = createLocalContrast(gray, width, height, targetWidth, expectedPartPolarity);
+    const contrastHistogram = new Uint32Array(256);
+    for (let i = 0; i < length; i++) contrastHistogram[thresholdGray[i]]++;
+    const contrastBase = otsuThreshold(contrastHistogram, length);
+    const optimized = optimizeThreshold(thresholdGray, width, height, Number(settings.minArea) || 40, contrastBase, targetWidth, 'bright', false);
     threshold = optimized.threshold;
-    polarity = optimized.polarity;
+    polarity = 'bright';
   } else if (polarity === 'auto') {
     let darkCount = 0;
     for (let i = 0; i < length; i++) if (gray[i] <= threshold) darkCount++;
     const darkRatio = darkCount / length;
     const brightRatio = 1 - darkRatio;
     polarity = occupancyScore(darkRatio) < occupancyScore(brightRatio) ? 'dark' : 'bright';
+    partPolarity = polarity;
   }
 
   const contrast = reference ? Math.max(7, Math.min(160, Math.abs(reference.meanBackground - reference.meanObject))) : 0;
@@ -62,7 +72,8 @@ function detect(rgba, width, height, settings) {
       const localMean = localMeanAt(integral, width, height, x, y, localRadius);
       pixelThreshold = Math.max(0, Math.min(255, localMean + (darkParts ? -1 : 1) * contrast * 0.38 + offset));
     }
-    const on = darkParts ? gray[i] <= pixelThreshold : gray[i] > pixelThreshold;
+    const value = useAdaptiveThreshold ? thresholdGray[i] : gray[i];
+    const on = darkParts ? value <= pixelThreshold : value > pixelThreshold;
     if (on) { thresholdMask[i] = 1; thresholdForeground++; }
   }
 
@@ -383,6 +394,9 @@ function detect(rgba, width, height, settings) {
 
   detections.sort((a, b) => a.area - b.area || a.label - b.label || a.partIndex - b.partIndex);
   const firstPart = detections.length ? detections[0] : null;
+  const previewMinArea = Math.max(minArea, Math.round(targetWidth * targetWidth * 0.04));
+  const binaryPreviewMask = removeSmallMaskComponents(thresholdMask, width, height, previewMinArea);
+  const binaryPreviewRemovedPixels = thresholdForeground - countForeground(binaryPreviewMask);
 
   return {
     detections,
@@ -392,7 +406,7 @@ function detect(rgba, width, height, settings) {
     countReferenceArea: unitAreaReference || null,
     countReferenceMethod: areaReference.method,
     threshold,
-    polarity,
+    polarity: partPolarity,
     autoThresholdUsed: automatic,
     foregroundRatio: foreground / length,
     componentCount: filteredComponentCount - autoNoiseComponents.length,
@@ -400,21 +414,58 @@ function detect(rgba, width, height, settings) {
     rawComponentCount,
     rejectedSmallComponentCount,
     removedNoisePixels: thresholdForeground - foreground,
+    binaryPreviewRemovedPixels,
     minArea,
     warningCount,
     components: componentSummaries,
     candidateLimitReached,
     width,
     height,
-    binaryMask: thresholdMask,
+    binaryMask: binaryPreviewMask,
     areaFilteredMask,
     closingRadius: closing.radius,
     closingMethod: closing.method,
     closingFilledPixels: closing.filledPixels + countForeground(filledMask) - countForeground(closing.mask),
     targetWidth,
     referenceUsed: reference ? { area: reference.area } : null,
-    localThreshold: !!reference && !automatic
+    localThreshold: useAdaptiveThreshold
   };
+}
+
+function removeSmallMaskComponents(mask, width, height, minArea) {
+  const cleaned = mask.slice();
+  const visited = new Uint8Array(mask.length);
+  const queue = new Int32Array(mask.length);
+  for (let start = 0; start < cleaned.length; start++) {
+    if (!cleaned[start] || visited[start]) continue;
+    let head = 0;
+    let tail = 0;
+    queue[tail++] = start;
+    visited[start] = 1;
+    while (head < tail) {
+      const index = queue[head++];
+      const x = index % width;
+      const y = (index / width) | 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        const ny = y + dy;
+        if (ny < 0 || ny >= height) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          if (!dx && !dy) continue;
+          const nx = x + dx;
+          if (nx < 0 || nx >= width) continue;
+          const neighbor = ny * width + nx;
+          if (cleaned[neighbor] && !visited[neighbor]) {
+            visited[neighbor] = 1;
+            queue[tail++] = neighbor;
+          }
+        }
+      }
+    }
+    if (tail < minArea) {
+      for (let i = 0; i < tail; i++) cleaned[queue[i]] = 0;
+    }
+  }
+  return cleaned;
 }
 
 function findSmallNoiseComponents(components, targetWidth) {
@@ -669,11 +720,27 @@ function componentStats(mask, width, height, minArea) {
   return { foreground, components };
 }
 
+function createLocalContrast(gray, width, height, targetWidth, sourcePolarity) {
+  const integral = grayscaleIntegral(gray, width, height);
+  const radius = Math.max(12, Math.min(180, Math.round(targetWidth * 3.5)));
+  const contrast = new Uint8Array(gray.length);
+  const direction = sourcePolarity === 'dark' ? 1 : -1;
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    for (let x = 0; x < width; x++) {
+      const localBackground = localMeanAt(integral, width, height, x, y, radius);
+      const response = 128 + direction * (localBackground - gray[row + x]);
+      contrast[row + x] = Math.max(0, Math.min(255, Math.round(response)));
+    }
+  }
+  return contrast;
+}
+
 // Search thresholds on a small image, then refine the best band at full
 // intensity resolution. The score favors coherent, repeatable components,
 // rejects foreground that reaches the tray edge, and penalizes speckle and
 // thresholds that turn most of the tray into foreground.
-function optimizeThreshold(gray, width, height, minArea, baseThreshold, targetWidth, expectedPolarity) {
+function optimizeThreshold(gray, width, height, minArea, baseThreshold, targetWidth, expectedPolarity, useHistogramHint = true) {
   const maxEdge = 240;
   const scale = Math.min(1, maxEdge / Math.max(width, height));
   const sampleWidth = Math.max(1, Math.round(width * scale));
@@ -700,7 +767,7 @@ function optimizeThreshold(gray, width, height, minArea, baseThreshold, targetWi
   const sampleMinArea = Math.max(2, Math.round(Math.max(minArea * scale * scale, expectedArea * 0.28)));
   // A strong local mode on the part side of Otsu gives a useful anchor when
   // tiny-width settings would otherwise reward many thread/noise fragments.
-  const thresholdHint = histogramThresholdHint(gray, baseThreshold, expectedPolarity);
+  const thresholdHint = useHistogramHint ? histogramThresholdHint(gray, baseThreshold, expectedPolarity) : null;
   const scores = new Map();
   const evaluate = (threshold, candidatePolarity) => {
     const key = `${candidatePolarity}:${threshold}`;

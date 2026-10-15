@@ -122,7 +122,7 @@
               <p class="field-help">画像の短辺に対する幅。小さい部品は左へ調整します。</p>
 
               <label class="check-row"><input id="autoThreshold" type="checkbox" checked><span>二値化条件を自動で最適化</span></label>
-              <p class="field-help">画像の端を背景として明暗の向きを決め、暗部の濃度ピークと閾値前後で形が保たれる度合いから選びます。</p>
+              <p class="field-help">近くの背景との明暗差を使い、照明むらを補正してから閾値を選びます。二値画像では部品幅に比べて小さい点状領域をノイズとして除きます。</p>
 
               <div class="range-heading"><label class="field-label" for="thresholdRange">明るさの境界</label><output id="thresholdValue">0</output></div>
               <input class="range-input" id="thresholdRange" type="range" min="-55" max="55" step="1" value="0">
@@ -155,6 +155,6 @@
     </main>
     <footer class="app-footer"><span>部品カウンター MVP</span><span>AIなし · 端末内画像処理</span></footer>
   </div>
-  <script src="./app.js?v=18" defer></script>
+  <script src="./app.js?v=19" defer></script>
 </body>
 </html>
