@@ -5,7 +5,7 @@
   const els = {
     cameraInput: $('cameraInput'), photoInput: $('photoInput'), cameraButton: $('cameraButton'), photoButton: $('photoButton'),
     analyzeButton: $('analyzeButton'), analyzeLabel: $('analyzeLabel'), canvas: $('imageCanvas'), stage: $('stage'), emptyState: $('emptyState'),
-    countValue: $('countValue'), positionCount: $('positionCount'), uncertainCount: $('uncertainCount'), resultBadge: $('resultBadge'),
+    countValue: $('countValue'), positionCount: $('positionCount'), areaCandidateCount: $('areaCandidateCount'), uncertainCount: $('uncertainCount'), resultBadge: $('resultBadge'),
     exportButton: $('exportButton'), statusLine: $('statusLine'), warningBanner: $('warningBanner'), warningTitle: $('warningTitle'), warningText: $('warningText'),
     viewMode: $('viewMode'), referenceMode: $('referenceMode'), addMode: $('addMode'), deleteMode: $('deleteMode'), modeHint: $('modeHint'), referenceSummary: $('referenceSummary'), clearReferenceButton: $('clearReferenceButton'), undoButton: $('undoButton'), clearEditsButton: $('clearEditsButton'),
     partName: $('partName'), sizeRange: $('sizeRange'), sizeValue: $('sizeValue'), thresholdRange: $('thresholdRange'), thresholdValue: $('thresholdValue'),
@@ -13,7 +13,7 @@
     zoomIn: $('zoomIn'), zoomOut: $('zoomOut'), zoomFit: $('zoomFit'), zoomReadout: $('zoomReadout'), offlineState: $('offlineState'), offlineText: $('offlineText')
   };
 
-  const SETTINGS_KEY = 'partsCounter.settings.v1';
+    const SETTINGS_KEY = 'partsCounter.settings.v1';
   const MAX_IMAGE_EDGE = 1400;
   const ctx = els.canvas.getContext('2d', { alpha: false });
   const baseCanvas = document.createElement('canvas');
@@ -79,7 +79,7 @@
 
   function registerWorker() {
     try {
-      worker = new Worker('./detector-worker.js');
+      worker = new Worker('./detector-worker.js?v=6');
       worker.addEventListener('message', (event) => {
         const { jobId, result, error } = event.data || {};
         if (jobId !== activeJob) return;
@@ -109,7 +109,9 @@
         els.exportButton.disabled = false;
         const level = result.polarity === 'dark' ? '暗い部品' : '明るい部品';
         const referenceNote = result.referenceUsed ? ` · 基準面積 ${Math.round(result.referenceUsed.area).toLocaleString()} px²・局所2値化` : '';
-        els.statusLine.textContent = `解析完了 · 境界 ${result.threshold} · ${level} · 輪郭領域 ${result.componentCount.toLocaleString()}件${referenceNote}`;
+        els.areaCandidateCount.textContent = result.componentCount.toLocaleString();
+        const binarization = result.localThreshold ? '局所二値化' : '全体二値化';
+        els.statusLine.textContent = `解析完了 · ${binarization} ${result.threshold} · 孤立ノイズ ${result.removedNoisePixels.toLocaleString()}画素を除去 · 面積 ${result.minArea} px²未満 ${result.rejectedSmallComponentCount.toLocaleString()}領域を除外 · 輪郭候補 ${result.componentCount.toLocaleString()}件 · ${level}${referenceNote}`;
         if (result.foregroundRatio > .72) {
           els.statusLine.textContent += ' · 背景まで選ばれている可能性があります。明暗設定・境界を調整してください。';
         }
@@ -162,6 +164,7 @@
       els.warningBanner.hidden = true;
       els.countValue.textContent = '—';
       els.positionCount.textContent = '0';
+      els.areaCandidateCount.textContent = '—';
       els.uncertainCount.textContent = '—';
       zoom = 1;
       updateCanvasSize();

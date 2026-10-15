@@ -75,12 +75,13 @@
 
         <aside class="side-column">
           <section class="count-card card" aria-live="polite">
-            <div class="count-topline"><span class="section-kicker">02 / 計数結果</span><span class="result-badge" id="resultBadge">未解析</span></div>
-            <div class="count-number-row"><strong id="countValue">—</strong><span>個</span></div>
+            <div class="count-topline"><span class="section-kicker">02 / 一次候補</span><span class="result-badge" id="resultBadge">未解析</span></div>
+            <div class="count-number-row"><strong id="countValue">—</strong><span>候補</span></div>
             <div class="count-divider"></div>
             <div class="count-details"><span>検出した位置</span><strong id="positionCount">0</strong></div>
+            <div class="count-details"><span>最小面積後の輪郭候補</span><strong id="areaCandidateCount">—</strong></div>
             <div class="count-details"><span>要確認の領域</span><strong id="uncertainCount">—</strong></div>
-            <div class="confidence-note" id="confidenceNote">実物写真での計数精度は未検証です。必ず検出位置を確認してください。</div>
+            <div class="confidence-note" id="confidenceNote">この段階では輪郭領域を候補として表示します。部品の実数ではありません。</div>
             <button class="button button-export" id="exportButton" type="button" disabled>CSVを書き出す <span aria-hidden="true">↓</span></button>
           </section>
 
@@ -125,8 +126,9 @@
                 <option value="dark">部品が暗い</option>
               </select>
 
-              <div class="range-heading"><label class="field-label" for="noiseRange">小さなノイズを除去</label><output id="noiseValue">12 px²</output></div>
-              <input class="range-input" id="noiseRange" type="range" min="3" max="80" step="1" value="12">
+              <div class="range-heading"><label class="field-label" for="noiseRange">小さなノイズを除去</label><output id="noiseValue">40 px²</output></div>
+              <input class="range-input" id="noiseRange" type="range" min="3" max="120" step="1" value="40">
+              <p class="field-help">孤立した1画素を除去した後、この面積未満の輪郭を候補から外します。</p>
 
               <label class="check-row"><input id="labelsCheck" type="checkbox"><span>位置に番号を表示</span></label>
               <button class="button button-save" id="saveSettingsButton" type="button">設定を保存</button>

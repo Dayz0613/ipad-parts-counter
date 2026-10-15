@@ -39,8 +39,8 @@ function detect(rgba, width, height, settings) {
   const integral = reference ? grayscaleIntegral(gray, width, height) : null;
   if (reference) threshold = Math.max(0, Math.min(255, Math.round((reference.meanObject + reference.meanBackground) / 2 + offset)));
 
-  const mask = new Uint8Array(length);
-  let foreground = 0;
+  const thresholdMask = new Uint8Array(length);
+  let thresholdForeground = 0;
   const darkParts = polarity === 'dark';
   for (let i = 0; i < length; i++) {
     let pixelThreshold = threshold;
@@ -51,16 +51,26 @@ function detect(rgba, width, height, settings) {
       pixelThreshold = Math.max(0, Math.min(255, localMean + (darkParts ? -1 : 1) * contrast * 0.38 + offset));
     }
     const on = darkParts ? gray[i] <= pixelThreshold : gray[i] > pixelThreshold;
-    if (on) { mask[i] = 1; foreground++; }
+    if (on) { thresholdMask[i] = 1; thresholdForeground++; }
   }
+
+  // Remove isolated one-pixel responses before measuring regions. Keep thin lines
+  // intact; the configurable minimum area below removes larger speckle clusters.
+  const mask = removeIsolatedPixels(thresholdMask, width, height);
+  let foreground = 0;
+  for (let i = 0; i < length; i++) if (mask[i]) foreground++;
 
   const minArea = Math.max(1, Number(settings.minArea) || 12);
   const labels = new Int32Array(length);
   const queue = new Int32Array(length);
   const components = [null];
   let nextLabel = 1;
+  let rawComponentCount = 0;
+  let filteredComponentCount = 0;
+  let rejectedSmallComponentCount = 0;
   for (let start = 0; start < length; start++) {
     if (!mask[start] || labels[start]) continue;
+    rawComponentCount++;
     const label = nextLabel++;
     labels[start] = label;
     queue[0] = start;
@@ -106,9 +116,11 @@ function detect(rgba, width, height, settings) {
       }
     }
     if (tail < minArea) {
+      rejectedSmallComponentCount++;
       components.push(null);
       continue;
     }
+    filteredComponentCount++;
     components.push({
       label,
       area: tail,
@@ -260,9 +272,12 @@ function detect(rgba, width, height, settings) {
     if (!component.peaks.length && component.area <= expectedArea * 2.8) {
       component.peaks.push({ x: component.cx, y: component.cy, radius: Math.sqrt(component.area / Math.PI) });
     }
-    const perItemArea = component.area / Math.max(1, component.peaks.length);
+    // First-pass output: one centroid per surviving connected region. Local
+    // distance peaks are diagnostics only; screw threads can create many peaks
+    // inside one physical screw and must not be counted as separate parts.
+    const perItemArea = component.area;
     const unusualArea = component.area > expectedArea * (reference ? 1.75 : 2.3);
-    const joined = component.peaks.length > 1;
+    const joined = component.area > expectedArea * 2.3;
     const relativeArea = perItemArea / expectedArea;
     const shapeRatio = reference ? component.aspect / Math.max(0.15, reference.aspect) : 1;
     const shapeMismatch = !!reference && (shapeRatio < 0.52 || shapeRatio > 1.9);
@@ -278,19 +293,18 @@ function detect(rgba, width, height, settings) {
       minorAxis: component.minorAxis,
       meanObject: component.meanObject,
       meanBackground: component.meanBackground,
-      peakCount: component.peaks.length
+      peakCount: 1,
+      localPeakCount: component.peaks.length
     });
-    for (const peak of component.peaks) {
-      detections.push({
-        x: peak.x,
-        y: peak.y,
-        label,
-        area: component.area,
-        angle: component.angle,
-        aspect: component.aspect,
-        uncertain: joined || unusualArea || peak.radius < targetWidth * 0.28 || (reference && (relativeArea < 0.42 || relativeArea > 1.9 || shapeMismatch))
-      });
-    }
+    detections.push({
+      x: component.cx,
+      y: component.cy,
+      label,
+      area: component.area,
+      angle: component.angle,
+      aspect: component.aspect,
+      uncertain: joined || unusualArea || (reference && (relativeArea < 0.42 || relativeArea > 1.9 || shapeMismatch))
+    });
   }
 
   return {
@@ -298,7 +312,11 @@ function detect(rgba, width, height, settings) {
     threshold,
     polarity,
     foregroundRatio: foreground / length,
-    componentCount: components.length - 1,
+    componentCount: filteredComponentCount,
+    rawComponentCount,
+    rejectedSmallComponentCount,
+    removedNoisePixels: thresholdForeground - foreground,
+    minArea,
     warningCount,
     components: componentSummaries,
     candidateLimitReached,
@@ -308,6 +326,28 @@ function detect(rgba, width, height, settings) {
     referenceUsed: reference ? { area: reference.area } : null,
     localThreshold: !!reference
   };
+}
+
+function removeIsolatedPixels(mask, width, height) {
+  const cleaned = mask.slice();
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const index = y * width + x;
+      if (!mask[index]) continue;
+      let neighbors = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        const ny = y + dy;
+        if (ny < 0 || ny >= height) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          if (!dx && !dy) continue;
+          const nx = x + dx;
+          if (nx >= 0 && nx < width && mask[ny * width + nx]) neighbors++;
+        }
+      }
+      if (!neighbors) cleaned[index] = 0;
+    }
+  }
+  return cleaned;
 }
 
 function grayscaleIntegral(gray, width, height) {
