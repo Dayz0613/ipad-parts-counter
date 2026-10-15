@@ -91,10 +91,13 @@
             </div>
             <div class="mode-switch" role="group" aria-label="画像の編集モード">
               <button class="mode-button active" id="viewMode" type="button" aria-pressed="true">見る</button>
+              <button class="mode-button" id="referenceMode" type="button" aria-pressed="false">基準部品</button>
               <button class="mode-button" id="addMode" type="button" aria-pressed="false">＋ 追加</button>
               <button class="mode-button" id="deleteMode" type="button" aria-pressed="false">− 削除</button>
             </div>
             <p class="mode-hint" id="modeHint">検出位置を拡大して確認できます。</p>
+            <div class="reference-summary" id="referenceSummary" aria-live="polite">基準部品なし · 解析後、はっきり写った1個を選べます。</div>
+            <button class="button button-quiet" id="clearReferenceButton" type="button" disabled>基準部品を解除</button>
             <button class="button button-quiet" id="clearEditsButton" type="button" disabled>手動修正をすべて戻す</button>
           </section>
 

@@ -7,7 +7,7 @@
     analyzeButton: $('analyzeButton'), analyzeLabel: $('analyzeLabel'), canvas: $('imageCanvas'), stage: $('stage'), emptyState: $('emptyState'),
     countValue: $('countValue'), positionCount: $('positionCount'), uncertainCount: $('uncertainCount'), resultBadge: $('resultBadge'),
     exportButton: $('exportButton'), statusLine: $('statusLine'), warningBanner: $('warningBanner'), warningTitle: $('warningTitle'), warningText: $('warningText'),
-    viewMode: $('viewMode'), addMode: $('addMode'), deleteMode: $('deleteMode'), modeHint: $('modeHint'), undoButton: $('undoButton'), clearEditsButton: $('clearEditsButton'),
+    viewMode: $('viewMode'), referenceMode: $('referenceMode'), addMode: $('addMode'), deleteMode: $('deleteMode'), modeHint: $('modeHint'), referenceSummary: $('referenceSummary'), clearReferenceButton: $('clearReferenceButton'), undoButton: $('undoButton'), clearEditsButton: $('clearEditsButton'),
     partName: $('partName'), sizeRange: $('sizeRange'), sizeValue: $('sizeValue'), thresholdRange: $('thresholdRange'), thresholdValue: $('thresholdValue'),
     polaritySelect: $('polaritySelect'), noiseRange: $('noiseRange'), noiseValue: $('noiseValue'), labelsCheck: $('labelsCheck'), saveSettingsButton: $('saveSettingsButton'), savedNote: $('savedNote'),
     zoomIn: $('zoomIn'), zoomOut: $('zoomOut'), zoomFit: $('zoomFit'), zoomReadout: $('zoomReadout'), offlineState: $('offlineState'), offlineText: $('offlineText')
@@ -34,6 +34,7 @@
   let activeJob = 0;
   let history = [];
   let adjustments = { removed: [], added: [] };
+  let referenceProfile = null;
 
   loadSettings();
   updateSettingsLabels();
@@ -52,10 +53,18 @@
     els.exportButton.addEventListener('click', exportCsv);
     els.canvas.addEventListener('click', onCanvasClick);
     els.viewMode.addEventListener('click', () => setMode('view'));
+    els.referenceMode.addEventListener('click', () => {
+      if (!analysisComplete) {
+        els.statusLine.textContent = '先に画像を解析してください。検出結果から、1個だけ離れて写った部品を基準に選びます。';
+        return;
+      }
+      setMode('reference');
+    });
     els.addMode.addEventListener('click', () => setMode('add'));
     els.deleteMode.addEventListener('click', () => setMode('delete'));
     els.undoButton.addEventListener('click', undoEdit);
     els.clearEditsButton.addEventListener('click', clearEdits);
+    els.clearReferenceButton.addEventListener('click', clearReference);
     els.zoomIn.addEventListener('click', () => setZoom(Math.min(4, zoom * 1.25)));
     els.zoomOut.addEventListener('click', () => setZoom(Math.max(.5, zoom / 1.25)));
     els.zoomFit.addEventListener('click', () => setZoom(1));
@@ -87,6 +96,9 @@
           x: point.x,
           y: point.y,
           label: point.label,
+          area: point.area,
+          angle: point.angle,
+          aspect: point.aspect,
           uncertain: point.uncertain,
           source: '自動検出'
         }));
@@ -96,7 +108,8 @@
         els.resultBadge.classList.add('ready');
         els.exportButton.disabled = false;
         const level = result.polarity === 'dark' ? '暗い部品' : '明るい部品';
-        els.statusLine.textContent = `解析完了 · 境界 ${result.threshold} · ${level} · 輪郭領域 ${result.componentCount.toLocaleString()}件`;
+        const referenceNote = result.referenceUsed ? ` · 基準面積 ${Math.round(result.referenceUsed.area).toLocaleString()} px²・局所2値化` : '';
+        els.statusLine.textContent = `解析完了 · 境界 ${result.threshold} · ${level} · 輪郭領域 ${result.componentCount.toLocaleString()}件${referenceNote}`;
         if (result.foregroundRatio > .72) {
           els.statusLine.textContent += ' · 背景まで選ばれている可能性があります。明暗設定・境界を調整してください。';
         }
@@ -196,7 +209,8 @@
             targetWidth: Math.max(3, shortEdge * Number(els.sizeRange.value) / 100),
             thresholdOffset: Number(els.thresholdRange.value),
             polarity: els.polaritySelect.value,
-            minArea: Number(els.noiseRange.value)
+            minArea: Number(els.noiseRange.value),
+            reference: referenceProfile
           }
         }, [pixels.buffer]);
       } catch (error) {
@@ -213,6 +227,10 @@
     const rect = els.canvas.getBoundingClientRect();
     const x = (event.clientX - rect.left) / rect.width * els.canvas.width;
     const y = (event.clientY - rect.top) / rect.height * els.canvas.height;
+    if (mode === 'reference') {
+      selectReference(x, y);
+      return;
+    }
     if (mode === 'add') {
       pushHistory();
       adjustments.added.push({ id: `manual-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, nx: x / els.canvas.width, ny: y / els.canvas.height });
@@ -343,7 +361,7 @@
   }
 
   function updateMode() {
-    const modes = [['view', els.viewMode], ['add', els.addMode], ['delete', els.deleteMode]];
+    const modes = [['view', els.viewMode], ['reference', els.referenceMode], ['add', els.addMode], ['delete', els.deleteMode]];
     for (const [name, button] of modes) {
       const active = mode === name;
       button.classList.toggle('active', active);
@@ -351,8 +369,62 @@
       button.classList.toggle('deleting', active && name === 'delete');
       button.setAttribute('aria-pressed', String(active));
     }
-    els.canvas.style.cursor = mode === 'add' ? 'copy' : mode === 'delete' ? 'not-allowed' : 'grab';
-    els.modeHint.textContent = mode === 'add' ? '画像上の部品の中心をタップすると1個追加します。' : mode === 'delete' ? '削除する検出位置をタップします。細かい場所は拡大してください。' : '検出位置を拡大して確認できます。';
+    els.canvas.style.cursor = mode === 'add' ? 'copy' : mode === 'delete' ? 'not-allowed' : mode === 'reference' ? 'crosshair' : 'grab';
+    els.modeHint.textContent = mode === 'add' ? '画像上の部品の中心をタップすると1個追加します。' : mode === 'delete' ? '削除する検出位置をタップします。細かい場所は拡大してください。' : mode === 'reference' ? '緑の検出位置をタップ。単独で写った部品を基準にします。' : '検出位置を拡大して確認できます。';
+  }
+
+  function selectReference(x, y) {
+    const point = nearestPoint(x, y);
+    if (!point || point.source !== '自動検出') {
+      els.statusLine.textContent = '緑色の自動検出位置を選んでください。接触部品や手動追加は基準にできません。';
+      return;
+    }
+    const component = analysisResult && analysisResult.components && analysisResult.components.find((item) => item.label === point.label);
+    if (!component || component.peakCount !== 1 || component.area < 8 || component.meanBackground === null) {
+      els.statusLine.textContent = '1個だけ離れて写り、背景との明暗差がある部品を選んでください。黄色の位置は基準に向きません。';
+      return;
+    }
+    const contrast = Math.abs(component.meanBackground - component.meanObject);
+    if (contrast < 7) {
+      els.statusLine.textContent = '選んだ部品と周囲の明るさが近すぎます。影や反射の少ない部品を選び直してください。';
+      return;
+    }
+    referenceProfile = {
+      area: component.area,
+      angle: component.angle,
+      aspect: component.aspect,
+      diameter: Math.max(3, 2 * Math.sqrt(component.area / Math.PI)),
+      meanObject: component.meanObject,
+      meanBackground: component.meanBackground,
+      polarity: analysisResult.polarity
+    };
+    updateReferenceSummary();
+    saveSettings(false);
+    setMode('view');
+    els.statusLine.textContent = `基準を記録しました · 面積 ${Math.round(component.area).toLocaleString()} px² · 角度 ${Math.round(component.angle)}°。基準に合わせて全体を再解析します。`;
+    analyze();
+  }
+
+  function clearReference() {
+    if (!referenceProfile) return;
+    referenceProfile = null;
+    updateReferenceSummary();
+    saveSettings(false);
+    if (analysisComplete) {
+      els.statusLine.textContent = '基準を解除しました。「再解析」を押すと通常の全体しきい値に戻ります。';
+      els.analyzeLabel.textContent = '再解析';
+      els.analyzeButton.disabled = !currentImage;
+    }
+  }
+
+  function updateReferenceSummary() {
+    if (!referenceProfile) {
+      els.referenceSummary.textContent = '基準部品なし · 解析後、はっきり写った1個を選べます。';
+      els.clearReferenceButton.disabled = true;
+      return;
+    }
+    els.referenceSummary.textContent = `基準あり · 面積 ${Math.round(referenceProfile.area).toLocaleString()} px² · 角度 ${Math.round(referenceProfile.angle)}° · 縦横比 ${referenceProfile.aspect.toFixed(2)}`;
+    els.clearReferenceButton.disabled = false;
   }
 
   function updateEditButtons() {
@@ -410,7 +482,8 @@
       thresholdOffset: els.thresholdRange.value,
       polarity: els.polaritySelect.value,
       minArea: els.noiseRange.value,
-      labels: els.labelsCheck.checked
+      labels: els.labelsCheck.checked,
+      reference: referenceProfile
     };
     try {
       localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
@@ -429,14 +502,16 @@
       if (settings.polarity) els.polaritySelect.value = settings.polarity;
       if (settings.minArea) els.noiseRange.value = settings.minArea;
       if (settings.labels !== undefined) els.labelsCheck.checked = settings.labels;
+      if (settings.reference && settings.reference.area > 0 && settings.reference.meanObject !== undefined && settings.reference.meanBackground !== undefined) referenceProfile = settings.reference;
     } catch (error) { /* 初回または保存値が壊れている場合は標準値を使う */ }
+    updateReferenceSummary();
   }
 
   function exportCsv() {
     if (!analysisComplete) return;
     const timestamp = new Date().toISOString();
     const rows = [[
-      '部品名', '元画像', '最終数量', '番号', '元画像X(px)', '元画像Y(px)', 'X(%)', 'Y(%)', '検出方法', '要確認', '解析日時', '明るさ境界', '明暗設定'
+      '部品名', '元画像', '最終数量', '番号', '元画像X(px)', '元画像Y(px)', 'X(%)', 'Y(%)', '検出方法', '検出領域面積(px²)', '検出角度(度)', '縦横比', '基準面積(px²)', '基準2値化', '要確認', '解析日時', '明るさ境界', '明暗設定'
     ]];
     const scaleX = originalWidth / Math.max(1, els.canvas.width);
     const scaleY = originalHeight / Math.max(1, els.canvas.height);
@@ -446,7 +521,9 @@
       rows.push([
         els.partName.value || '', currentFileName, visiblePoints.length, index + 1,
         Math.round(x), Math.round(y), (x / originalWidth * 100).toFixed(2), (y / originalHeight * 100).toFixed(2),
-        point.source, point.uncertain ? '要確認' : '', timestamp, analysisResult.threshold,
+        point.source, point.area ? Math.round(point.area) : '', point.angle !== undefined ? point.angle.toFixed(1) : '', point.aspect ? point.aspect.toFixed(2) : '',
+        referenceProfile ? Math.round(referenceProfile.area) : '', analysisResult.localThreshold ? '局所しきい値' : '全体しきい値',
+        point.uncertain ? '要確認' : '', timestamp, analysisResult.threshold,
         analysisResult.polarity === 'dark' ? '暗い部品' : '明るい部品'
       ]);
     });

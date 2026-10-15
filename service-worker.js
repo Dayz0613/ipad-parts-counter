@@ -1,4 +1,4 @@
-const CACHE_NAME = 'parts-counter-shell-v2';
+const CACHE_NAME = 'parts-counter-shell-v3';
 const SHELL_FILES = [
   './',
   './index.html',

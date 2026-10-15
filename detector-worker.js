@@ -19,9 +19,10 @@ function detect(rgba, width, height, settings) {
     histogram[y]++;
   }
   const baseThreshold = otsuThreshold(histogram, length);
-  const threshold = Math.max(0, Math.min(255, baseThreshold + Number(settings.thresholdOffset || 0)));
+  const reference = settings.reference && settings.reference.area > 0 ? settings.reference : null;
+  let threshold = Math.max(0, Math.min(255, baseThreshold + Number(settings.thresholdOffset || 0)));
 
-  let polarity = settings.polarity;
+  let polarity = reference ? reference.polarity : settings.polarity;
   if (polarity === 'auto') {
     let darkCount = 0;
     for (let i = 0; i < length; i++) if (gray[i] <= threshold) darkCount++;
@@ -30,15 +31,29 @@ function detect(rgba, width, height, settings) {
     polarity = occupancyScore(darkRatio) < occupancyScore(brightRatio) ? 'dark' : 'bright';
   }
 
+  const requestedWidth = Math.max(3, Number(settings.targetWidth) || Math.min(width, height) * 0.028);
+  const targetWidth = reference ? Math.max(3, Number(reference.diameter) || 2 * Math.sqrt(reference.area / Math.PI)) : requestedWidth;
+  const offset = Number(settings.thresholdOffset || 0);
+  const contrast = reference ? Math.max(7, Math.min(160, Math.abs(reference.meanBackground - reference.meanObject))) : 0;
+  const localRadius = reference ? Math.max(6, Math.min(100, Math.round(targetWidth * 1.45))) : 0;
+  const integral = reference ? grayscaleIntegral(gray, width, height) : null;
+  if (reference) threshold = Math.max(0, Math.min(255, Math.round((reference.meanObject + reference.meanBackground) / 2 + offset)));
+
   const mask = new Uint8Array(length);
   let foreground = 0;
   const darkParts = polarity === 'dark';
   for (let i = 0; i < length; i++) {
-    const on = darkParts ? gray[i] <= threshold : gray[i] > threshold;
+    let pixelThreshold = threshold;
+    if (reference) {
+      const x = i % width;
+      const y = (i / width) | 0;
+      const localMean = localMeanAt(integral, width, height, x, y, localRadius);
+      pixelThreshold = Math.max(0, Math.min(255, localMean + (darkParts ? -1 : 1) * contrast * 0.38 + offset));
+    }
+    const on = darkParts ? gray[i] <= pixelThreshold : gray[i] > pixelThreshold;
     if (on) { mask[i] = 1; foreground++; }
   }
 
-  const targetWidth = Math.max(3, Number(settings.targetWidth) || Math.min(width, height) * 0.028);
   const minArea = Math.max(1, Number(settings.minArea) || 12);
   const labels = new Int32Array(length);
   const queue = new Int32Array(length);
@@ -53,6 +68,10 @@ function detect(rgba, width, height, settings) {
     let tail = 1;
     let sumX = 0;
     let sumY = 0;
+    let sumXX = 0;
+    let sumYY = 0;
+    let sumXY = 0;
+    let sumGray = 0;
     let minX = width;
     let minY = height;
     let maxX = 0;
@@ -63,6 +82,10 @@ function detect(rgba, width, height, settings) {
       const y = (index / width) | 0;
       sumX += x;
       sumY += y;
+      sumXX += x * x;
+      sumYY += y * y;
+      sumXY += x * y;
+      sumGray += gray[index];
       if (x < minX) minX = x;
       if (x > maxX) maxX = x;
       if (y < minY) minY = y;
@@ -91,9 +114,43 @@ function detect(rgba, width, height, settings) {
       area: tail,
       cx: sumX / tail,
       cy: sumY / tail,
+      sumXX,
+      sumYY,
+      sumXY,
+      meanObject: sumGray / tail,
       minX, minY, maxX, maxY,
       peaks: []
     });
+  }
+
+  for (let label = 1; label < components.length; label++) {
+    const component = components[label];
+    if (!component) continue;
+    const varianceX = Math.max(0, component.sumXX / component.area - component.cx * component.cx);
+    const varianceY = Math.max(0, component.sumYY / component.area - component.cy * component.cy);
+    const covariance = component.sumXY / component.area - component.cx * component.cy;
+    const root = Math.sqrt(Math.max(0, (varianceX - varianceY) ** 2 + 4 * covariance * covariance));
+    const eigenMajor = Math.max(0.01, (varianceX + varianceY + root) / 2);
+    const eigenMinor = Math.max(0.01, (varianceX + varianceY - root) / 2);
+    component.angle = Math.atan2(2 * covariance, varianceX - varianceY) * 90 / Math.PI;
+    component.aspect = Math.sqrt(eigenMajor / eigenMinor);
+    component.majorAxis = 4 * Math.sqrt(eigenMajor);
+    component.minorAxis = 4 * Math.sqrt(eigenMinor);
+    const pad = Math.max(3, Math.round(targetWidth * 0.28));
+    const left = Math.max(0, component.minX - pad);
+    const right = Math.min(width - 1, component.maxX + pad);
+    const top = Math.max(0, component.minY - pad);
+    const bottom = Math.min(height - 1, component.maxY + pad);
+    let backgroundSum = 0;
+    let backgroundCount = 0;
+    for (let y = top; y <= bottom; y++) {
+      for (let x = left; x <= right; x++) {
+        if (x >= component.minX && x <= component.maxX && y >= component.minY && y <= component.maxY) continue;
+        backgroundSum += gray[y * width + x];
+        backgroundCount++;
+      }
+    }
+    component.meanBackground = backgroundCount ? backgroundSum / backgroundCount : null;
   }
 
   const distance = new Uint16Array(length);
@@ -168,7 +225,9 @@ function detect(rgba, width, height, settings) {
   for (const candidate of candidates) {
     const component = components[candidate.label];
     if (!component || component.area < minArea) continue;
-    const maximumPerComponent = Math.max(1, Math.ceil(component.area / (targetWidth * targetWidth * 0.22)));
+    const maximumPerComponent = reference
+      ? Math.max(1, Math.ceil(component.area / (reference.area * 1.12)))
+      : Math.max(1, Math.ceil(component.area / (targetWidth * targetWidth * 0.22)));
     const cellX = Math.floor(candidate.x / minSeparation);
     const cellY = Math.floor(candidate.y / minSeparation);
     let crowded = false;
@@ -192,7 +251,8 @@ function detect(rgba, width, height, settings) {
 
   const detections = [];
   let warningCount = 0;
-  const expectedArea = Math.max(9, targetWidth * targetWidth * 0.9);
+  const expectedArea = Math.max(9, reference ? reference.area : targetWidth * targetWidth * 0.9);
+  const componentSummaries = [];
   for (let label = 1; label < components.length; label++) {
     const component = components[label];
     if (!component) continue;
@@ -200,15 +260,35 @@ function detect(rgba, width, height, settings) {
     if (!component.peaks.length && component.area <= expectedArea * 2.8) {
       component.peaks.push({ x: component.cx, y: component.cy, radius: Math.sqrt(component.area / Math.PI) });
     }
-    const unusualArea = component.area > expectedArea * 2.3;
+    const perItemArea = component.area / Math.max(1, component.peaks.length);
+    const unusualArea = component.area > expectedArea * (reference ? 1.75 : 2.3);
     const joined = component.peaks.length > 1;
-    if (joined || unusualArea) warningCount++;
+    const relativeArea = perItemArea / expectedArea;
+    const shapeRatio = reference ? component.aspect / Math.max(0.15, reference.aspect) : 1;
+    const shapeMismatch = !!reference && (shapeRatio < 0.52 || shapeRatio > 1.9);
+    if (joined || unusualArea || (reference && (relativeArea < 0.42 || relativeArea > 1.9 || shapeMismatch))) warningCount++;
+    componentSummaries.push({
+      label,
+      area: component.area,
+      cx: component.cx,
+      cy: component.cy,
+      angle: component.angle,
+      aspect: component.aspect,
+      majorAxis: component.majorAxis,
+      minorAxis: component.minorAxis,
+      meanObject: component.meanObject,
+      meanBackground: component.meanBackground,
+      peakCount: component.peaks.length
+    });
     for (const peak of component.peaks) {
       detections.push({
         x: peak.x,
         y: peak.y,
         label,
-        uncertain: joined || unusualArea || peak.radius < targetWidth * 0.28
+        area: component.area,
+        angle: component.angle,
+        aspect: component.aspect,
+        uncertain: joined || unusualArea || peak.radius < targetWidth * 0.28 || (reference && (relativeArea < 0.42 || relativeArea > 1.9 || shapeMismatch))
       });
     }
   }
@@ -220,11 +300,40 @@ function detect(rgba, width, height, settings) {
     foregroundRatio: foreground / length,
     componentCount: components.length - 1,
     warningCount,
+    components: componentSummaries,
     candidateLimitReached,
     width,
     height,
-    targetWidth
+    targetWidth,
+    referenceUsed: reference ? { area: reference.area } : null,
+    localThreshold: !!reference
   };
+}
+
+function grayscaleIntegral(gray, width, height) {
+  const stride = width + 1;
+  const integral = new Uint32Array(stride * (height + 1));
+  for (let y = 1; y <= height; y++) {
+    let rowSum = 0;
+    const source = (y - 1) * width;
+    const target = y * stride;
+    const previous = (y - 1) * stride;
+    for (let x = 1; x <= width; x++) {
+      rowSum += gray[source + x - 1];
+      integral[target + x] = integral[previous + x] + rowSum;
+    }
+  }
+  return integral;
+}
+
+function localMeanAt(integral, width, height, x, y, radius) {
+  const stride = width + 1;
+  const left = Math.max(0, x - radius);
+  const right = Math.min(width, x + radius + 1);
+  const top = Math.max(0, y - radius);
+  const bottom = Math.min(height, y + radius + 1);
+  const sum = integral[bottom * stride + right] - integral[top * stride + right] - integral[bottom * stride + left] + integral[top * stride + left];
+  return sum / Math.max(1, (right - left) * (bottom - top));
 }
 
 function occupancyScore(ratio) {
