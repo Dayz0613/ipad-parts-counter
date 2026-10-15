@@ -5,6 +5,7 @@
   const els = {
     cameraInput: $('cameraInput'), photoInput: $('photoInput'), cameraButton: $('cameraButton'), photoButton: $('photoButton'),
     analyzeButton: $('analyzeButton'), analyzeLabel: $('analyzeLabel'), canvas: $('imageCanvas'), stage: $('stage'), emptyState: $('emptyState'),
+    originalView: $('originalView'), binaryView: $('binaryView'), cleanedView: $('cleanedView'),
     countValue: $('countValue'), positionCount: $('positionCount'), areaCandidateCount: $('areaCandidateCount'), uncertainCount: $('uncertainCount'), resultBadge: $('resultBadge'),
     exportButton: $('exportButton'), statusLine: $('statusLine'), warningBanner: $('warningBanner'), warningTitle: $('warningTitle'), warningText: $('warningText'),
     viewMode: $('viewMode'), referenceMode: $('referenceMode'), addMode: $('addMode'), deleteMode: $('deleteMode'), modeHint: $('modeHint'), referenceSummary: $('referenceSummary'), clearReferenceButton: $('clearReferenceButton'), undoButton: $('undoButton'), clearEditsButton: $('clearEditsButton'),
@@ -18,6 +19,10 @@
   const ctx = els.canvas.getContext('2d', { alpha: false });
   const baseCanvas = document.createElement('canvas');
   const baseCtx = baseCanvas.getContext('2d', { willReadFrequently: true });
+  const binaryCanvas = document.createElement('canvas');
+  const binaryCtx = binaryCanvas.getContext('2d', { willReadFrequently: true });
+  const cleanedCanvas = document.createElement('canvas');
+  const cleanedCtx = cleanedCanvas.getContext('2d', { willReadFrequently: true });
   let currentImage = null;
   let currentFileName = '';
   let imageUrl = '';
@@ -30,6 +35,7 @@
   let processing = false;
   let zoom = 1;
   let mode = 'view';
+  let previewMode = 'original';
   let worker = null;
   let activeJob = 0;
   let history = [];
@@ -50,6 +56,9 @@
     els.cameraInput.addEventListener('change', onFileSelected);
     els.photoInput.addEventListener('change', onFileSelected);
     els.analyzeButton.addEventListener('click', analyze);
+    els.originalView.addEventListener('click', () => setPreviewMode('original'));
+    els.binaryView.addEventListener('click', () => setPreviewMode('binary'));
+    els.cleanedView.addEventListener('click', () => setPreviewMode('cleaned'));
     els.exportButton.addEventListener('click', exportCsv);
     els.canvas.addEventListener('click', onCanvasClick);
     els.viewMode.addEventListener('click', () => setMode('view'));
@@ -79,7 +88,7 @@
 
   function registerWorker() {
     try {
-      worker = new Worker('./detector-worker.js?v=6');
+      worker = new Worker('./detector-worker.js?v=7');
       worker.addEventListener('message', (event) => {
         const { jobId, result, error } = event.data || {};
         if (jobId !== activeJob) return;
@@ -91,6 +100,10 @@
           return;
         }
         analysisResult = result;
+        renderMaskPreview(binaryCanvas, binaryCtx, result.binaryMask, result.width, result.height);
+        renderMaskPreview(cleanedCanvas, cleanedCtx, result.areaFilteredMask, result.width, result.height);
+        els.binaryView.disabled = false;
+        els.cleanedView.disabled = false;
         basePoints = result.detections.map((point, index) => ({
           id: `auto-${index}`,
           x: point.x,
@@ -144,6 +157,10 @@
     currentFileName = file.name || '撮影画像';
     analysisComplete = false;
     analysisResult = null;
+    previewMode = 'original';
+    els.binaryView.disabled = true;
+    els.cleanedView.disabled = true;
+    updatePreviewButtons();
     basePoints = [];
     visiblePoints = [];
     adjustments = { removed: [], added: [] };
@@ -321,7 +338,9 @@
   function renderCanvas() {
     if (!baseCanvas.width) return;
     ctx.clearRect(0, 0, els.canvas.width, els.canvas.height);
-    ctx.drawImage(baseCanvas, 0, 0);
+    const sourceCanvas = previewMode === 'binary' ? binaryCanvas : previewMode === 'cleaned' ? cleanedCanvas : baseCanvas;
+    ctx.drawImage(sourceCanvas, 0, 0);
+    if (previewMode !== 'original') return;
     const markerRadius = Math.max(4, Math.min(9, Math.min(els.canvas.width, els.canvas.height) * .006));
     for (let index = 0; index < visiblePoints.length; index++) {
       const point = visiblePoints[index];
@@ -340,6 +359,36 @@
         ctx.fillStyle = '#07111d';
         ctx.fillText(String(index + 1), point.x, point.y + .4);
       }
+    }
+  }
+
+  function renderMaskPreview(canvas, context, mask, width, height) {
+    if (!mask || mask.length !== width * height) return;
+    canvas.width = width;
+    canvas.height = height;
+    const image = context.createImageData(width, height);
+    for (let i = 0, p = 0; i < mask.length; i++, p += 4) {
+      const value = mask[i] ? 0 : 255;
+      image.data[p] = value;
+      image.data[p + 1] = value;
+      image.data[p + 2] = value;
+      image.data[p + 3] = 255;
+    }
+    context.putImageData(image, 0, 0);
+  }
+
+  function setPreviewMode(nextMode) {
+    if (nextMode !== 'original' && !analysisResult) return;
+    previewMode = nextMode;
+    updatePreviewButtons();
+    renderCanvas();
+  }
+
+  function updatePreviewButtons() {
+    for (const [name, button] of [['original', els.originalView], ['binary', els.binaryView], ['cleaned', els.cleanedView]]) {
+      const active = previewMode === name;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', String(active));
     }
   }
 
@@ -554,7 +603,7 @@
       els.offlineText.textContent = 'HTTPSで開くとオフライン利用可';
       return;
     }
-    navigator.serviceWorker.register('./service-worker.js').then(() => navigator.serviceWorker.ready).then(() => {
+    navigator.serviceWorker.register('./service-worker.js?v=7').then(() => navigator.serviceWorker.ready).then(() => {
       els.offlineState.classList.add('ready');
       els.offlineText.textContent = 'オフライン利用の準備OK';
     }).catch(() => {

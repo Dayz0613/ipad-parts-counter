@@ -83,6 +83,10 @@ h1 { margin: 9px 0 7px; font-size: clamp(26px, 3.3vw, 38px); line-height: 1.12; 
 .stage { position: relative; display: flex; align-items: center; justify-content: center; min-height: 330px; max-height: min(63vh, 720px); overflow: auto; overscroll-behavior: contain; border: 1px solid rgba(184,207,236,.08); border-radius: 14px; background-color: #0b1522; background-image: radial-gradient(rgba(130,154,183,.14) .7px, transparent .7px); background-size: 13px 13px; }
 .image-canvas { display: none; flex: 0 0 auto; max-width: none; height: auto; cursor: crosshair; touch-action: pan-x pan-y; }
 .image-canvas.visible { display: block; }
+.preview-switch { display: flex; gap: 6px; padding: 8px 1px 0; }
+.preview-button { min-height: 31px; padding: 0 11px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); background: #0d1928; font-size: 10px; cursor: pointer; }
+.preview-button[aria-pressed="true"] { border-color: rgba(122,156,255,.35); color: #dbe5ff; background: #263b5d; }
+.preview-button:disabled { opacity: .42; cursor: not-allowed; }
 .empty-state { display: flex; align-items: center; flex-direction: column; gap: 8px; max-width: 370px; padding: 32px 20px; text-align: center; }
 .empty-state[hidden] { display: none; }
 .empty-state > strong { margin-top: 5px; font-size: 14px; font-weight: 620; }

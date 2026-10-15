@@ -3,7 +3,7 @@ self.addEventListener('message', (event) => {
   const { pixels, width, height, settings, jobId } = event.data;
   try {
     const result = detect(new Uint8ClampedArray(pixels), width, height, settings);
-    self.postMessage({ jobId, result });
+    self.postMessage({ jobId, result }, [result.binaryMask.buffer, result.areaFilteredMask.buffer]);
   } catch (error) {
     self.postMessage({ jobId, error: String(error && error.message || error) });
   }
@@ -63,6 +63,7 @@ function detect(rgba, width, height, settings) {
   const minArea = Math.max(1, Number(settings.minArea) || 12);
   const labels = new Int32Array(length);
   const queue = new Int32Array(length);
+  const areaFilteredMask = new Uint8Array(length);
   const components = [null];
   let nextLabel = 1;
   let rawComponentCount = 0;
@@ -121,6 +122,7 @@ function detect(rgba, width, height, settings) {
       continue;
     }
     filteredComponentCount++;
+    for (let i = 0; i < tail; i++) areaFilteredMask[queue[i]] = 1;
     components.push({
       label,
       area: tail,
@@ -322,6 +324,8 @@ function detect(rgba, width, height, settings) {
     candidateLimitReached,
     width,
     height,
+    binaryMask: thresholdMask,
+    areaFilteredMask,
     targetWidth,
     referenceUsed: reference ? { area: reference.area } : null,
     localThreshold: !!reference

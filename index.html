@@ -10,7 +10,7 @@
   <link rel="manifest" href="./manifest.webmanifest">
   <link rel="apple-touch-icon" sizes="180x180" href="./apple-touch-icon.png">
   <link rel="icon" href="./icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./styles.css?v=7">
   <title>部品カウンター</title>
 </head>
 <body>
@@ -64,6 +64,12 @@
               <span>部品が重ならないよう、トレー全体を真上から撮ると調整しやすくなります。</span>
             </div>
             <canvas id="imageCanvas" class="image-canvas" aria-label="検出位置。追加または削除モードでタップして編集"></canvas>
+          </div>
+
+          <div class="preview-switch" role="group" aria-label="画像処理段階">
+            <button class="preview-button active" id="originalView" type="button" aria-pressed="true">カラー写真</button>
+            <button class="preview-button" id="binaryView" type="button" aria-pressed="false" disabled>二値画像</button>
+            <button class="preview-button" id="cleanedView" type="button" aria-pressed="false" disabled>ノイズ除去後</button>
           </div>
 
           <div class="viewer-footer">
@@ -146,6 +152,6 @@
     </main>
     <footer class="app-footer"><span>部品カウンター MVP</span><span>AIなし · 端末内画像処理</span></footer>
   </div>
-  <script src="./app.js" defer></script>
+  <script src="./app.js?v=7" defer></script>
 </body>
 </html>
