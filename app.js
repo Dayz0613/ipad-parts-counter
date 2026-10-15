@@ -89,7 +89,7 @@
 
   function registerWorker() {
     try {
-      worker = new Worker('./detector-worker.js?v=13');
+      worker = new Worker('./detector-worker.js?v=16');
       worker.addEventListener('message', (event) => {
         const { jobId, result, error } = event.data || {};
         if (jobId !== activeJob) return;
@@ -113,6 +113,7 @@
           area: point.area,
           angle: point.angle,
           aspect: point.aspect,
+          firstPart: point.label === result.firstPartLabel,
           uncertain: point.uncertain,
           source: '自動検出'
         }));
@@ -123,10 +124,11 @@
         els.exportButton.disabled = false;
         const level = result.polarity === 'dark' ? '暗い部品' : '明るい部品';
         const referenceNote = result.referenceUsed ? ` · 基準面積 ${Math.round(result.referenceUsed.area).toLocaleString()} px²・局所2値化` : '';
+        const firstPartNote = result.firstPartArea ? ` · 最小領域 ${Math.round(result.firstPartArea).toLocaleString()} px²を1個基準として面積換算（推定${result.estimatedQuantity}個）` : '';
         els.areaCandidateCount.textContent = result.componentCount.toLocaleString();
         const binarization = result.localThreshold ? '局所二値化' : result.autoThresholdUsed ? '自動最適化' : '全体二値化';
-        const closingNote = result.closingRadius ? ` · 自動膨張収縮 半径${result.closingRadius}px・塗り足し${result.closingFilledPixels.toLocaleString()}画素` : ' · 自動膨張収縮 なし（合体・膨張を避けました）';
-        els.statusLine.textContent = `解析完了 · ${binarization} ${result.threshold} · 孤立ノイズ ${result.removedNoisePixels.toLocaleString()}画素を除去${closingNote} · 面積 ${result.minArea} px²未満 ${result.rejectedSmallComponentCount.toLocaleString()}領域を除外 · 輪郭候補 ${result.componentCount.toLocaleString()}件 · ${level}${referenceNote}`;
+        const closingNote = result.closingRadius ? ` · 自動膨張収縮 半径${result.closingRadius}px（領域数の安定から選択）・塗り足し${result.closingFilledPixels.toLocaleString()}画素` : ' · 自動膨張収縮 なし（合体・膨張を避けました）';
+        els.statusLine.textContent = `解析完了 · ${binarization} ${result.threshold} · 孤立ノイズ ${result.removedNoisePixels.toLocaleString()}画素を除去${closingNote} · 面積 ${result.minArea} px²未満 ${result.rejectedSmallComponentCount.toLocaleString()}領域を除外 · 輪郭候補 ${result.componentCount.toLocaleString()}件${firstPartNote} · ${level}${referenceNote}`;
         if (result.foregroundRatio > .72) {
           els.statusLine.textContent += ' · 背景まで選ばれている可能性があります。明暗設定・境界を調整してください。';
         }
@@ -347,7 +349,7 @@
     const markerRadius = Math.max(4, Math.min(9, Math.min(els.canvas.width, els.canvas.height) * .006));
     for (let index = 0; index < visiblePoints.length; index++) {
       const point = visiblePoints[index];
-      const color = point.source === '手動追加' ? '#7a9cff' : point.uncertain ? '#ffc365' : '#47d4b0';
+      const color = point.source === '手動追加' ? '#7a9cff' : point.firstPart ? '#ff66a3' : point.uncertain ? '#ffc365' : '#47d4b0';
       ctx.beginPath();
       ctx.arc(point.x, point.y, markerRadius, 0, Math.PI * 2);
       ctx.fillStyle = `${color}38`;
@@ -505,7 +507,7 @@
       els.warningText.textContent = '明暗設定や「明るさの境界」を調整して再解析してください。検出位置が全体に広がっているときは、特に確認が必要です。';
     } else if (warnings > 0) {
       els.warningTitle.textContent = `接触・重なりの可能性がある領域: ${warnings.toLocaleString()}箇所`;
-      els.warningText.textContent = '黄色の位置を拡大して確認してください。輪郭がつながった部品は自動で分けきれないことがあり、検出位置の数は実物の数量を保証しません。追加・削除モードで修正できます。';
+      els.warningText.textContent = '黄色の位置を拡大して確認してください。最小面積の部品を1個分の基準にして領域面積から換算しています。部品の重なりで見える面積が減ると、数量が少なく見積もられることがあります。';
     } else if (analysisResult.candidateLimitReached) {
       els.warningTitle.textContent = '検出候補が多すぎます';
       els.warningText.textContent = '画像にノイズや模様が多く、処理上限に達しました。部品の幅、明暗設定、ノイズ除去を調整して再解析してください。';
@@ -615,7 +617,7 @@
       els.offlineText.textContent = 'HTTPSで開くとオフライン利用可';
       return;
     }
-    navigator.serviceWorker.register('./service-worker.js?v=13').then(() => navigator.serviceWorker.ready).then(() => {
+    navigator.serviceWorker.register('./service-worker.js?v=16').then(() => navigator.serviceWorker.ready).then(() => {
       els.offlineState.classList.add('ready');
       els.offlineText.textContent = 'オフライン利用の準備OK';
     }).catch(() => {

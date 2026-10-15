@@ -65,7 +65,7 @@ function detect(rgba, width, height, settings) {
 
   // Automatically infer the closing radius from the estimated part width.
   const minArea = Math.max(1, Number(settings.minArea) || 12);
-  const closing = selectClosing(thresholdMask, width, height, targetWidth);
+  const closing = selectClosing(thresholdMask, width, height, targetWidth, minArea);
   // Fill enclosed background pockets so the part interior becomes one solid
   // foreground region after closing has sealed narrow openings.
   const filledMask = fillEnclosedHoles(closing.mask, width, height);
@@ -181,6 +181,16 @@ function detect(rgba, width, height, settings) {
     component.meanBackground = backgroundCount ? backgroundSum / backgroundCount : null;
   }
 
+  const firstPartComponent = components.slice(1).filter(Boolean).reduce((smallest, component) =>
+    !smallest || component.area < smallest.area ? component : smallest, null);
+  const firstPartArea = firstPartComponent ? firstPartComponent.area : 0;
+  for (let label = 1; label < components.length; label++) {
+    const component = components[label];
+    if (component) component.estimatedQuantity = firstPartArea
+      ? Math.max(1, Math.floor(component.area / firstPartArea + 1e-7))
+      : 1;
+  }
+
   const distance = new Uint16Array(length);
   const infinity = 30000;
   for (let i = 0; i < length; i++) distance[i] = mask[i] ? infinity : 0;
@@ -248,14 +258,12 @@ function detect(rgba, width, height, settings) {
   candidates.sort((a, b) => b.distance - a.distance);
 
   const buckets = new Map();
-  const minSeparation = Math.max(4, targetWidth * 0.68);
+  const minSeparation = Math.max(10, targetWidth * 2.8);
   const minSeparationSquared = minSeparation * minSeparation;
   for (const candidate of candidates) {
     const component = components[candidate.label];
     if (!component || component.area < minArea) continue;
-    const maximumPerComponent = reference
-      ? Math.max(1, Math.ceil(component.area / (reference.area * 1.12)))
-      : Math.max(1, Math.ceil(component.area / (targetWidth * targetWidth * 0.22)));
+    const maximumPerComponent = component.estimatedQuantity || 1;
     const cellX = Math.floor(candidate.x / minSeparation);
     const cellY = Math.floor(candidate.y / minSeparation);
     let crowded = false;
@@ -279,7 +287,7 @@ function detect(rgba, width, height, settings) {
 
   const detections = [];
   let warningCount = 0;
-  const expectedArea = Math.max(9, reference ? reference.area : targetWidth * targetWidth * 0.9);
+  const expectedArea = Math.max(9, firstPartArea || (reference ? reference.area : targetWidth * targetWidth * 0.9));
   const componentSummaries = [];
   for (let label = 1; label < components.length; label++) {
     const component = components[label];
@@ -288,12 +296,13 @@ function detect(rgba, width, height, settings) {
     if (!component.peaks.length && component.area <= expectedArea * 2.8) {
       component.peaks.push({ x: component.cx, y: component.cy, radius: Math.sqrt(component.area / Math.PI) });
     }
-    // First-pass output: one centroid per surviving connected region. Local
-    // distance peaks are diagnostics only; screw threads can create many peaks
-    // inside one physical screw and must not be counted as separate parts.
-    const perItemArea = component.area;
+    // Use the smallest surviving component as a one-part area reference.
+    // Joined regions are estimated by whole reference-area units (floor), which
+    // avoids counting overlap and shadows as extra parts.
+    const estimatedQuantity = component.estimatedQuantity || 1;
+    const perItemArea = component.area / estimatedQuantity;
     const unusualArea = component.area > expectedArea * (reference ? 1.75 : 2.3);
-    const joined = component.area > expectedArea * 2.3;
+    const joined = estimatedQuantity > 1 || component.area > expectedArea * 2.3;
     const relativeArea = perItemArea / expectedArea;
     const shapeRatio = reference ? component.aspect / Math.max(0.15, reference.aspect) : 1;
     const shapeMismatch = !!reference && (shapeRatio < 0.52 || shapeRatio > 1.9);
@@ -303,28 +312,52 @@ function detect(rgba, width, height, settings) {
       area: component.area,
       cx: component.cx,
       cy: component.cy,
+      minX: component.minX,
+      minY: component.minY,
+      maxX: component.maxX,
+      maxY: component.maxY,
       angle: component.angle,
       aspect: component.aspect,
       majorAxis: component.majorAxis,
       minorAxis: component.minorAxis,
       meanObject: component.meanObject,
       meanBackground: component.meanBackground,
-      peakCount: 1,
-      localPeakCount: component.peaks.length
+      peakCount: estimatedQuantity,
+      estimatedQuantity,
+      localPeakCount: component.peaks.length,
+      localPeakPositions: component.peaks.map(({ x, y }) => ({ x, y }))
     });
-    detections.push({
-      x: component.cx,
-      y: component.cy,
-      label,
-      area: component.area,
-      angle: component.angle,
-      aspect: component.aspect,
-      uncertain: joined || unusualArea || (reference && (relativeArea < 0.42 || relativeArea > 1.9 || shapeMismatch))
-    });
+    const centers = estimatedQuantity === 1
+      ? [{ x: component.cx, y: component.cy }]
+      : component.peaks.slice(0, estimatedQuantity);
+    while (centers.length < estimatedQuantity) centers.push({ x: component.cx, y: component.cy });
+    for (let partIndex = 0; partIndex < estimatedQuantity; partIndex++) {
+      const center = centers[partIndex];
+      detections.push({
+        x: center.x,
+        y: center.y,
+        label,
+        partIndex,
+        area: perItemArea,
+        minX: component.minX,
+        minY: component.minY,
+        maxX: component.maxX,
+        maxY: component.maxY,
+        angle: component.angle,
+        aspect: component.aspect,
+        uncertain: joined || unusualArea || (reference && (relativeArea < 0.42 || relativeArea > 1.9 || shapeMismatch))
+      });
+    }
   }
+
+  detections.sort((a, b) => a.area - b.area || a.label - b.label || a.partIndex - b.partIndex);
+  const firstPart = detections.length ? detections[0] : null;
 
   return {
     detections,
+    estimatedQuantity: detections.length,
+    firstPartLabel: firstPart ? firstPart.label : null,
+    firstPartArea: firstPart ? firstPart.area : null,
     threshold,
     polarity,
     autoThresholdUsed: automatic,
@@ -342,6 +375,7 @@ function detect(rgba, width, height, settings) {
     binaryMask: thresholdMask,
     areaFilteredMask,
     closingRadius: closing.radius,
+    closingMethod: closing.method,
     closingFilledPixels: closing.filledPixels + countForeground(filledMask) - countForeground(closing.mask),
     targetWidth,
     referenceUsed: reference ? { area: reference.area } : null,
@@ -352,22 +386,31 @@ function detect(rgba, width, height, settings) {
 // Morphological closing (dilation followed by erosion) seals narrow gaps in a
 // part's binary silhouette. Kernel size is inferred from the estimated part
 // width, and enclosed background pockets are filled afterward.
-function selectClosing(source, width, height, targetWidth) {
+function selectClosing(source, width, height, targetWidth, minArea) {
   const baseline = removeIsolatedPixels(source, width, height);
-  const baselineForeground = countForeground(baseline);
-  const maxRadius = Math.max(1, Math.min(35, Math.ceil(Math.max(3, targetWidth) * 6)));
-  let best = { mask: baseline, radius: 0, filledPixels: 0 };
-  const radii = [2, 4, 8, 16, 24, 32, 40, maxRadius].filter((radius, index, all) => radius <= maxRadius && all.indexOf(radius) === index);
-  for (const radius of radii) {
+  const baselineStats = componentStats(baseline, width, height, minArea);
+  // Search a scale-relative range, then stop as soon as component counts
+  // stabilize. The plateau's first radius is the smallest useful closing
+  // strength; on the screw reference photo, counts go 7 -> 6 -> 6, so this
+  // selects 2px rather than hard-coding it.
+  const maxRadius = Math.max(3, Math.min(12, Math.ceil(Math.max(3, targetWidth) * 0.75)));
+  let best = { mask: baseline, radius: 0, filledPixels: 0, method: 'none' };
+  let previous = { ...best, foreground: baselineStats.foreground, components: baselineStats.components };
+  for (let radius = 1; radius <= maxRadius; radius++) {
     const candidate = removeIsolatedPixels(closeMask(source, width, height, radius), width, height);
-    const added = countForeground(candidate) - baselineForeground;
-    const growth = added / Math.max(1, baselineForeground);
-    // Use the largest inferred radius that keeps the total foreground growth
-    // bounded. Joining nearby regions is allowed for the requested fill effect.
-    if (growth > 2) break;
-    if (added > 0) best = { mask: candidate, radius, filledPixels: added };
+    const stats = componentStats(candidate, width, height, minArea);
+    const added = stats.foreground - baselineStats.foreground;
+    const growth = added / Math.max(1, baselineStats.foreground);
+    // Reject a radius that starts swallowing too much of the surrounding area.
+    if (growth > 1) break;
+    const current = { mask: candidate, radius, filledPixels: Math.max(0, added), foreground: stats.foreground, components: stats.components };
+    if (added > 0) best = { ...current, method: 'component-count-stability' };
+    if (radius > 1 && current.components === previous.components && previous.radius > 0 && previous.filledPixels > 0) {
+      return { mask: previous.mask, radius: previous.radius, filledPixels: previous.filledPixels, method: 'component-count-stability' };
+    }
+    previous = current;
   }
-  return best;
+  return { mask: best.mask, radius: best.radius, filledPixels: best.filledPixels, method: best.method };
 }
 
 function countForeground(mask) {
