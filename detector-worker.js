@@ -20,10 +20,15 @@ function detect(rgba, width, height, settings) {
   }
   const baseThreshold = otsuThreshold(histogram, length);
   const reference = settings.reference && settings.reference.area > 0 ? settings.reference : null;
-  let threshold = Math.max(0, Math.min(255, baseThreshold + Number(settings.thresholdOffset || 0)));
-
+  const automatic = !!settings.autoThreshold && !reference;
+  const offset = automatic ? 0 : Number(settings.thresholdOffset || 0);
+  let threshold = Math.max(0, Math.min(255, baseThreshold + offset));
   let polarity = reference ? reference.polarity : settings.polarity;
-  if (polarity === 'auto') {
+  if (automatic) {
+    const optimized = optimizeThreshold(gray, width, height, Number(settings.minArea) || 40, baseThreshold);
+    threshold = optimized.threshold;
+    polarity = optimized.polarity;
+  } else if (polarity === 'auto') {
     let darkCount = 0;
     for (let i = 0; i < length; i++) if (gray[i] <= threshold) darkCount++;
     const darkRatio = darkCount / length;
@@ -33,7 +38,6 @@ function detect(rgba, width, height, settings) {
 
   const requestedWidth = Math.max(3, Number(settings.targetWidth) || Math.min(width, height) * 0.028);
   const targetWidth = reference ? Math.max(3, Number(reference.diameter) || 2 * Math.sqrt(reference.area / Math.PI)) : requestedWidth;
-  const offset = Number(settings.thresholdOffset || 0);
   const contrast = reference ? Math.max(7, Math.min(160, Math.abs(reference.meanBackground - reference.meanObject))) : 0;
   const localRadius = reference ? Math.max(6, Math.min(100, Math.round(targetWidth * 1.45))) : 0;
   const integral = reference ? grayscaleIntegral(gray, width, height) : null;
@@ -313,6 +317,7 @@ function detect(rgba, width, height, settings) {
     detections,
     threshold,
     polarity,
+    autoThresholdUsed: automatic,
     foregroundRatio: foreground / length,
     componentCount: filteredComponentCount,
     rawComponentCount,
@@ -330,6 +335,138 @@ function detect(rgba, width, height, settings) {
     referenceUsed: reference ? { area: reference.area } : null,
     localThreshold: !!reference
   };
+}
+
+// Search thresholds on a small image, then refine the best band at full
+// intensity resolution. The score favors coherent, repeatable components,
+// rejects foreground that reaches the tray edge, and penalizes speckle and
+// thresholds that turn most of the tray into foreground.
+function optimizeThreshold(gray, width, height, minArea, baseThreshold) {
+  const maxEdge = 240;
+  const scale = Math.min(1, maxEdge / Math.max(width, height));
+  const sampleWidth = Math.max(1, Math.round(width * scale));
+  const sampleHeight = Math.max(1, Math.round(height * scale));
+  const sample = new Uint8Array(sampleWidth * sampleHeight);
+  for (let sy = 0; sy < sampleHeight; sy++) {
+    const y0 = Math.floor(sy * height / sampleHeight);
+    const y1 = Math.max(y0 + 1, Math.floor((sy + 1) * height / sampleHeight));
+    for (let sx = 0; sx < sampleWidth; sx++) {
+      const x0 = Math.floor(sx * width / sampleWidth);
+      const x1 = Math.max(x0 + 1, Math.floor((sx + 1) * width / sampleWidth));
+      let sum = 0;
+      let count = 0;
+      for (let y = y0; y < y1; y++) {
+        const row = y * width;
+        for (let x = x0; x < x1; x++) { sum += gray[row + x]; count++; }
+      }
+      sample[sy * sampleWidth + sx] = Math.round(sum / Math.max(1, count));
+    }
+  }
+
+  const sampleMinArea = Math.max(2, Math.round(minArea * scale * scale));
+  const scores = new Map();
+  const evaluate = (threshold, candidatePolarity) => {
+    const key = `${candidatePolarity}:${threshold}`;
+    if (!scores.has(key)) scores.set(key, scoreThreshold(sample, sampleWidth, sampleHeight, threshold, candidatePolarity, sampleMinArea));
+    return scores.get(key);
+  };
+
+  let best = { score: -Infinity, threshold: baseThreshold, polarity: 'dark' };
+  for (const candidatePolarity of ['dark', 'bright']) {
+    for (let threshold = 24; threshold <= 232; threshold += 4) {
+      const center = evaluate(threshold, candidatePolarity);
+      const before = evaluate(Math.max(0, threshold - 4), candidatePolarity);
+      const after = evaluate(Math.min(255, threshold + 4), candidatePolarity);
+      const stableScore = center * 0.6 + before * 0.2 + after * 0.2;
+      if (stableScore > best.score) best = { score: stableScore, threshold, polarity: candidatePolarity };
+    }
+  }
+
+  const coarse = best.threshold;
+  for (let threshold = Math.max(1, coarse - 4); threshold <= Math.min(254, coarse + 4); threshold++) {
+    const center = evaluate(threshold, best.polarity);
+    const before = evaluate(Math.max(0, threshold - 1), best.polarity);
+    const after = evaluate(Math.min(255, threshold + 1), best.polarity);
+    const stableScore = center * 0.6 + before * 0.2 + after * 0.2;
+    if (stableScore > best.score) best = { score: stableScore, threshold, polarity: best.polarity };
+  }
+  return best;
+}
+
+function scoreThreshold(gray, width, height, threshold, polarity, minArea) {
+  const length = gray.length;
+  const raw = new Uint8Array(length);
+  for (let i = 0; i < length; i++) {
+    raw[i] = polarity === 'dark' ? (gray[i] <= threshold ? 1 : 0) : (gray[i] > threshold ? 1 : 0);
+  }
+  const mask = removeIsolatedPixels(raw, width, height);
+  const labels = new Uint8Array(length);
+  const queue = new Int32Array(length);
+  const areas = [];
+  let foreground = 0;
+  let borderForeground = 0;
+  let tinyForeground = 0;
+  const border = Math.max(1, Math.round(Math.min(width, height) * 0.025));
+
+  for (let start = 0; start < length; start++) {
+    if (!mask[start] || labels[start]) continue;
+    let head = 0;
+    let tail = 0;
+    queue[tail++] = start;
+    labels[start] = 1;
+    let touchesBorder = false;
+    let edgePixels = 0;
+    while (head < tail) {
+      const index = queue[head++];
+      const x = index % width;
+      const y = (index / width) | 0;
+      if (x < border || y < border || x >= width - border || y >= height - border) {
+        touchesBorder = true;
+        edgePixels++;
+      }
+      for (let dy = -1; dy <= 1; dy++) {
+        const ny = y + dy;
+        if (ny < 0 || ny >= height) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          if (!dx && !dy) continue;
+          const nx = x + dx;
+          if (nx < 0 || nx >= width) continue;
+          const neighbor = ny * width + nx;
+          if (mask[neighbor] && !labels[neighbor]) {
+            labels[neighbor] = 1;
+            queue[tail++] = neighbor;
+          }
+        }
+      }
+    }
+    foreground += tail;
+    if (tail < minArea) tinyForeground += tail;
+    else {
+      areas.push(tail);
+      if (touchesBorder) borderForeground += tail;
+    }
+  }
+
+  const occupancy = foreground / Math.max(1, length);
+  if (!areas.length || occupancy < 0.0002 || occupancy > 0.72) return -10 + Math.min(occupancy, 1);
+  areas.sort((a, b) => a - b);
+  const totalValid = areas.reduce((sum, area) => sum + area, 0);
+  const median = areas[Math.floor(areas.length / 2)];
+  const logDeviations = areas.map((area) => Math.abs(Math.log(area / Math.max(1, median))));
+  logDeviations.sort((a, b) => a - b);
+  const logMad = logDeviations[Math.floor(logDeviations.length / 2)];
+  const largestShare = areas[areas.length - 1] / Math.max(1, totalValid);
+  const tinyRatio = tinyForeground / Math.max(1, foreground);
+  const edgeRatio = borderForeground / Math.max(1, foreground);
+  const countReward = Math.min(1.25, Math.log1p(areas.length) / Math.log(9));
+  const occupancyPenalty = Math.max(0, occupancy - 0.35) * 3;
+  return 1.8 * countReward
+    + 0.35 * (totalValid / Math.max(1, foreground))
+    - 2.8 * tinyRatio
+    - 5.5 * edgeRatio
+    - 0.8 * logMad
+    - 1.8 * Math.max(0, largestShare - 0.3)
+    - occupancyPenalty;
 }
 
 function removeIsolatedPixels(mask, width, height) {

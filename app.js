@@ -9,7 +9,7 @@
     countValue: $('countValue'), positionCount: $('positionCount'), areaCandidateCount: $('areaCandidateCount'), uncertainCount: $('uncertainCount'), resultBadge: $('resultBadge'),
     exportButton: $('exportButton'), statusLine: $('statusLine'), warningBanner: $('warningBanner'), warningTitle: $('warningTitle'), warningText: $('warningText'),
     viewMode: $('viewMode'), referenceMode: $('referenceMode'), addMode: $('addMode'), deleteMode: $('deleteMode'), modeHint: $('modeHint'), referenceSummary: $('referenceSummary'), clearReferenceButton: $('clearReferenceButton'), undoButton: $('undoButton'), clearEditsButton: $('clearEditsButton'),
-    partName: $('partName'), sizeRange: $('sizeRange'), sizeValue: $('sizeValue'), thresholdRange: $('thresholdRange'), thresholdValue: $('thresholdValue'),
+    partName: $('partName'), sizeRange: $('sizeRange'), sizeValue: $('sizeValue'), autoThreshold: $('autoThreshold'), thresholdRange: $('thresholdRange'), thresholdValue: $('thresholdValue'),
     polaritySelect: $('polaritySelect'), noiseRange: $('noiseRange'), noiseValue: $('noiseValue'), labelsCheck: $('labelsCheck'), saveSettingsButton: $('saveSettingsButton'), savedNote: $('savedNote'),
     zoomIn: $('zoomIn'), zoomOut: $('zoomOut'), zoomFit: $('zoomFit'), zoomReadout: $('zoomReadout'), offlineState: $('offlineState'), offlineText: $('offlineText')
   };
@@ -78,17 +78,18 @@
     els.zoomOut.addEventListener('click', () => setZoom(Math.max(.5, zoom / 1.25)));
     els.zoomFit.addEventListener('click', () => setZoom(1));
     els.saveSettingsButton.addEventListener('click', () => saveSettings(true));
-    [els.partName, els.sizeRange, els.thresholdRange, els.polaritySelect, els.noiseRange, els.labelsCheck].forEach((el) => {
+    [els.partName, els.sizeRange, els.thresholdRange, els.polaritySelect, els.noiseRange, els.labelsCheck, els.autoThreshold].forEach((el) => {
       el.addEventListener('input', onSettingsChanged);
       el.addEventListener('change', onSettingsChanged);
     });
+    els.autoThreshold.addEventListener('change', updateThresholdControls);
     window.addEventListener('resize', updateCanvasSize);
     if ('ResizeObserver' in window) new ResizeObserver(updateCanvasSize).observe(els.stage);
   }
 
   function registerWorker() {
     try {
-      worker = new Worker('./detector-worker.js?v=7');
+      worker = new Worker('./detector-worker.js?v=8');
       worker.addEventListener('message', (event) => {
         const { jobId, result, error } = event.data || {};
         if (jobId !== activeJob) return;
@@ -123,7 +124,7 @@
         const level = result.polarity === 'dark' ? '暗い部品' : '明るい部品';
         const referenceNote = result.referenceUsed ? ` · 基準面積 ${Math.round(result.referenceUsed.area).toLocaleString()} px²・局所2値化` : '';
         els.areaCandidateCount.textContent = result.componentCount.toLocaleString();
-        const binarization = result.localThreshold ? '局所二値化' : '全体二値化';
+        const binarization = result.localThreshold ? '局所二値化' : result.autoThresholdUsed ? '自動最適化' : '全体二値化';
         els.statusLine.textContent = `解析完了 · ${binarization} ${result.threshold} · 孤立ノイズ ${result.removedNoisePixels.toLocaleString()}画素を除去 · 面積 ${result.minArea} px²未満 ${result.rejectedSmallComponentCount.toLocaleString()}領域を除外 · 輪郭候補 ${result.componentCount.toLocaleString()}件 · ${level}${referenceNote}`;
         if (result.foregroundRatio > .72) {
           els.statusLine.textContent += ' · 背景まで選ばれている可能性があります。明暗設定・境界を調整してください。';
@@ -229,6 +230,7 @@
             targetWidth: Math.max(3, shortEdge * Number(els.sizeRange.value) / 100),
             thresholdOffset: Number(els.thresholdRange.value),
             polarity: els.polaritySelect.value,
+            autoThreshold: els.autoThreshold.checked,
             minArea: Number(els.noiseRange.value),
             reference: referenceProfile
           }
@@ -512,8 +514,14 @@
 
   function updateSettingsLabels() {
     els.sizeValue.textContent = `${Number(els.sizeRange.value).toFixed(1)}%`;
-    els.thresholdValue.textContent = `${Number(els.thresholdRange.value) > 0 ? '+' : ''}${els.thresholdRange.value}`;
+    els.thresholdValue.textContent = els.autoThreshold.checked ? '自動' : `${Number(els.thresholdRange.value) > 0 ? '+' : ''}${els.thresholdRange.value}`;
     els.noiseValue.textContent = `${els.noiseRange.value} px²`;
+  }
+
+  function updateThresholdControls() {
+    const automatic = els.autoThreshold.checked;
+    els.thresholdRange.disabled = automatic;
+    els.polaritySelect.disabled = automatic;
   }
 
   function onSettingsChanged() {
@@ -533,6 +541,7 @@
       sizePct: els.sizeRange.value,
       thresholdOffset: els.thresholdRange.value,
       polarity: els.polaritySelect.value,
+      autoThreshold: els.autoThreshold.checked,
       minArea: els.noiseRange.value,
       labels: els.labelsCheck.checked,
       reference: referenceProfile
@@ -552,10 +561,12 @@
       if (settings.sizePct) els.sizeRange.value = settings.sizePct;
       if (settings.thresholdOffset !== undefined) els.thresholdRange.value = settings.thresholdOffset;
       if (settings.polarity) els.polaritySelect.value = settings.polarity;
+      els.autoThreshold.checked = settings.autoThreshold !== false;
       if (settings.minArea) els.noiseRange.value = settings.minArea;
       if (settings.labels !== undefined) els.labelsCheck.checked = settings.labels;
       if (settings.reference && settings.reference.area > 0 && settings.reference.meanObject !== undefined && settings.reference.meanBackground !== undefined) referenceProfile = settings.reference;
     } catch (error) { /* 初回または保存値が壊れている場合は標準値を使う */ }
+    updateThresholdControls();
     updateReferenceSummary();
   }
 
@@ -603,7 +614,7 @@
       els.offlineText.textContent = 'HTTPSで開くとオフライン利用可';
       return;
     }
-    navigator.serviceWorker.register('./service-worker.js?v=7').then(() => navigator.serviceWorker.ready).then(() => {
+    navigator.serviceWorker.register('./service-worker.js?v=8').then(() => navigator.serviceWorker.ready).then(() => {
       els.offlineState.classList.add('ready');
       els.offlineText.textContent = 'オフライン利用の準備OK';
     }).catch(() => {
