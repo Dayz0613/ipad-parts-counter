@@ -218,7 +218,7 @@ function detect(rgba, width, height, settings) {
   for (let label = 1; label < components.length; label++) {
     const component = components[label];
     if (component) component.estimatedQuantity = component.autoNoise ? 0 : unitAreaReference
-      ? estimateAreaUnits(component.area, unitAreaReference, 0.3)
+      ? estimateAreaUnits(component.area, unitAreaReference, 0.35, 0.3)
       : 1;
   }
 
@@ -479,15 +479,14 @@ function removeSmallMaskComponents(mask, width, height, minArea) {
   return cleaned;
 }
 
-function estimateAreaUnits(area, unitArea, tolerance) {
+function estimateAreaUnits(area, unitArea, lowerTolerance, upperTolerance) {
   const ratio = area / Math.max(1, unitArea);
-  const maxUnits = Math.min(50000, Math.max(1, Math.ceil(ratio / (1 - tolerance))));
+  const maxUnits = Math.min(50000, Math.max(1, Math.ceil(ratio / (1 - lowerTolerance))));
   let bestCount = 0;
   let bestRelativeError = Infinity;
   for (let count = 1; count <= maxUnits; count++) {
     const perUnitRatio = ratio / count;
-    const absoluteError = Math.abs(perUnitRatio - 1);
-    if (absoluteError > tolerance) continue;
+    if (perUnitRatio < 1 - lowerTolerance || perUnitRatio > 1 + upperTolerance) continue;
     // Occlusion tends to remove visible foreground, so when two adjacent
     // counts both fit the tolerance band, mildly prefer the higher count.
     const relativeError = perUnitRatio < 1
