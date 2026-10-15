@@ -89,7 +89,7 @@
 
   function registerWorker() {
     try {
-      worker = new Worker('./detector-worker.js?v=17');
+      worker = new Worker('./detector-worker.js?v=18');
       worker.addEventListener('message', (event) => {
         const { jobId, result, error } = event.data || {};
         if (jobId !== activeJob) return;
@@ -126,12 +126,15 @@
         const referenceNote = result.referenceUsed
           ? ` · 選択形状を基準（面積 ${Math.round(result.referenceUsed.area).toLocaleString()} px²・${result.localThreshold ? '局所二値化' : '明暗方向と面積比に反映'}）`
           : '';
-        const countReferenceLabel = result.referenceUsed ? '選択した基準部品' : '最小面積の領域';
+        const countReferenceLabel = result.referenceUsed
+          ? '選択した基準部品'
+          : result.countReferenceMethod === 'shape-consensus' ? '似た形の領域群の中央値' : '最小の有効領域';
         const firstPartNote = result.countReferenceArea ? ` · ${countReferenceLabel} ${Math.round(result.countReferenceArea).toLocaleString()} px²・形状特徴を1個基準として換算（推定${result.estimatedQuantity}個）` : '';
         els.areaCandidateCount.textContent = result.componentCount.toLocaleString();
         const binarization = result.localThreshold ? '局所二値化' : result.autoThresholdUsed ? '自動最適化' : '全体二値化';
         const closingNote = result.closingRadius ? ` · 自動膨張収縮 半径${result.closingRadius}px（領域数の安定から選択）・塗り足し${result.closingFilledPixels.toLocaleString()}画素` : ' · 自動膨張収縮 なし（合体・膨張を避けました）';
-        els.statusLine.textContent = `解析完了 · ${binarization} ${result.threshold} · 孤立ノイズ ${result.removedNoisePixels.toLocaleString()}画素を除去${closingNote} · 面積 ${result.minArea} px²未満 ${result.rejectedSmallComponentCount.toLocaleString()}領域を除外 · 輪郭候補 ${result.componentCount.toLocaleString()}件${firstPartNote} · ${level}${referenceNote}`;
+        const smallNoiseNote = result.autoNoiseComponentCount ? ` · 小さなノイズ候補を自動除外 ${result.autoNoiseComponentCount}領域` : '';
+        els.statusLine.textContent = `解析完了 · ${binarization} ${result.threshold} · 孤立ノイズ ${result.removedNoisePixels.toLocaleString()}画素を除去${closingNote} · 面積 ${result.minArea} px²未満 ${result.rejectedSmallComponentCount.toLocaleString()}領域を除外${smallNoiseNote} · 輪郭候補 ${result.componentCount.toLocaleString()}件${firstPartNote} · ${level}${referenceNote}`;
         if (result.foregroundRatio > .72) {
           els.statusLine.textContent += ' · 背景まで選ばれている可能性があります。明暗設定・境界を調整してください。';
         }
@@ -628,7 +631,7 @@
       els.offlineText.textContent = 'HTTPSで開くとオフライン利用可';
       return;
     }
-    navigator.serviceWorker.register('./service-worker.js?v=17').then(() => navigator.serviceWorker.ready).then(() => {
+    navigator.serviceWorker.register('./service-worker.js?v=18').then(() => navigator.serviceWorker.ready).then(() => {
       els.offlineState.classList.add('ready');
       els.offlineText.textContent = 'オフライン利用の準備OK';
     }).catch(() => {

@@ -188,13 +188,25 @@ function detect(rgba, width, height, settings) {
     component.meanBackground = backgroundCount ? backgroundSum / backgroundCount : null;
   }
 
-  const firstPartComponent = components.slice(1).filter(Boolean).reduce((smallest, component) =>
+  const autoNoiseComponents = findSmallNoiseComponents(components, targetWidth);
+  for (const component of autoNoiseComponents) component.autoNoise = true;
+  if (autoNoiseComponents.length) {
+    for (let i = 0; i < labels.length; i++) {
+      const label = labels[i];
+      if (label && components[label] && components[label].autoNoise) areaFilteredMask[i] = 0;
+    }
+  }
+  const countableComponents = components.slice(1).filter((component) => component && !component.autoNoise);
+  const areaReference = reference
+    ? { area: Number(reference.area), component: null, method: 'selected-shape' }
+    : selectAreaReference(countableComponents, targetWidth);
+  const firstPartComponent = areaReference.component || countableComponents.reduce((smallest, component) =>
     !smallest || component.area < smallest.area ? component : smallest, null);
   const firstPartArea = firstPartComponent ? firstPartComponent.area : 0;
-  const unitAreaReference = reference ? Number(reference.area) : firstPartArea;
+  const unitAreaReference = reference ? Number(reference.area) : (areaReference.area || firstPartArea);
   for (let label = 1; label < components.length; label++) {
     const component = components[label];
-    if (component) component.estimatedQuantity = unitAreaReference
+    if (component) component.estimatedQuantity = component.autoNoise ? 0 : unitAreaReference
       ? Math.max(1, Math.floor(component.area / unitAreaReference + 1e-7))
       : 1;
   }
@@ -243,7 +255,7 @@ function detect(rgba, width, height, settings) {
     for (let x = 1; x < width - 1; x++) {
       const i = row + x;
       const label = labels[i];
-      if (!label || !components[label] || components[label].area < minArea) continue;
+      if (!label || !components[label] || components[label].area < minArea || components[label].autoNoise) continue;
       const d = distance[i];
       if (d < minPeakDistance) continue;
       let isMaximum = true;
@@ -271,7 +283,7 @@ function detect(rgba, width, height, settings) {
   const minSeparationSquared = minSeparation * minSeparation;
   for (const candidate of candidates) {
     const component = components[candidate.label];
-    if (!component || component.area < minArea) continue;
+    if (!component || component.area < minArea || component.autoNoise) continue;
     const maximumPerComponent = component.estimatedQuantity || 1;
     const cellX = Math.floor(candidate.x / minSeparation);
     const cellY = Math.floor(candidate.y / minSeparation);
@@ -297,11 +309,11 @@ function detect(rgba, width, height, settings) {
   const detections = [];
   let warningCount = 0;
   const expectedArea = Math.max(9, unitAreaReference || targetWidth * targetWidth * 0.9);
-  const expectedShape = reference || firstPartComponent;
+  const expectedShape = reference || areaReference.component || firstPartComponent;
   const componentSummaries = [];
   for (let label = 1; label < components.length; label++) {
     const component = components[label];
-    if (!component) continue;
+    if (!component || component.autoNoise) continue;
     if (component.area < minArea) continue;
     if (!component.peaks.length && component.area <= expectedArea * 2.8) {
       component.peaks.push({ x: component.cx, y: component.cy, radius: Math.sqrt(component.area / Math.PI) });
@@ -375,14 +387,16 @@ function detect(rgba, width, height, settings) {
   return {
     detections,
     estimatedQuantity: detections.length,
-    firstPartLabel: firstPart ? firstPart.label : null,
-    firstPartArea: firstPart ? firstPart.area : null,
+    firstPartLabel: areaReference.component ? areaReference.component.label : firstPart ? firstPart.label : null,
+    firstPartArea: areaReference.area || (firstPart ? firstPart.area : null),
     countReferenceArea: unitAreaReference || null,
+    countReferenceMethod: areaReference.method,
     threshold,
     polarity,
     autoThresholdUsed: automatic,
     foregroundRatio: foreground / length,
-    componentCount: filteredComponentCount,
+    componentCount: filteredComponentCount - autoNoiseComponents.length,
+    autoNoiseComponentCount: autoNoiseComponents.length,
     rawComponentCount,
     rejectedSmallComponentCount,
     removedNoisePixels: thresholdForeground - foreground,
@@ -401,6 +415,58 @@ function detect(rgba, width, height, settings) {
     referenceUsed: reference ? { area: reference.area } : null,
     localThreshold: !!reference && !automatic
   };
+}
+
+function findSmallNoiseComponents(components, targetWidth) {
+  const items = components.slice(1).filter(Boolean);
+  if (items.length < 5) return [];
+  const dimensionLimit = Math.max(6, targetWidth * 0.85);
+  const areaLimit = Math.max(24, targetWidth * targetWidth * 0.35);
+  const small = items.filter((component) =>
+    Math.max(component.width, component.height) < dimensionLimit && component.area < areaLimit
+  );
+  const smallSet = new Set(small);
+  const regular = items.filter((component) => !smallSet.has(component));
+  if (small.length < 2 || regular.length < Math.max(3, Math.ceil(items.length * 0.35))) return [];
+  const smallMaxArea = small.reduce((max, component) => Math.max(max, component.area), 0);
+  const regularMinArea = regular.reduce((min, component) => Math.min(min, component.area), Infinity);
+  return regularMinArea / Math.max(1, smallMaxArea) >= 3 ? small : [];
+}
+
+function selectAreaReference(components, targetWidth) {
+  if (!components.length) return { area: 0, component: null, method: 'no-candidate' };
+  const sizeQualified = components.filter((component) =>
+    Math.max(component.width, component.height) >= targetWidth * 1.1
+  );
+  const pool = sizeQualified.length ? sizeQualified : components;
+  const aspectTolerance = 0.28;
+  const solidityTolerance = 0.12;
+  const ranked = pool.map((candidate) => {
+    const neighbors = pool.filter((other) =>
+      Math.abs(Math.log(Math.max(0.01, candidate.aspect) / Math.max(0.01, other.aspect))) < aspectTolerance &&
+      Math.abs(candidate.solidity - other.solidity) < solidityTolerance
+    );
+    return { candidate, neighbors };
+  }).sort((a, b) =>
+    b.neighbors.length - a.neighbors.length ||
+    b.candidate.solidity - a.candidate.solidity ||
+    a.candidate.area - b.candidate.area
+  );
+  const best = ranked[0];
+  const minimumClusterSize = Math.max(5, Math.ceil(pool.length * 0.4));
+  if (best.neighbors.length >= minimumClusterSize) {
+    const areas = best.neighbors.map((component) => component.area).sort((a, b) => a - b);
+    const middle = Math.floor(areas.length / 2);
+    const area = areas.length % 2 ? areas[middle] : (areas[middle - 1] + areas[middle]) / 2;
+    const component = best.neighbors.reduce((nearest, item) =>
+      Math.abs(item.area - area) < Math.abs(nearest.area - area) ? item : nearest
+    );
+    return { area, component, method: 'shape-consensus' };
+  }
+  const smallest = pool.reduce((bestComponent, component) =>
+    component.area < bestComponent.area ? component : bestComponent
+  );
+  return { area: smallest.area, component: smallest, method: 'smallest-plausible' };
 }
 
 // Morphological closing (dilation followed by erosion) seals narrow gaps in a
