@@ -371,6 +371,9 @@ function optimizeThreshold(gray, width, height, minArea, baseThreshold, targetWi
   const sampleTargetWidth = Math.max(1, targetWidth * scale);
   const expectedArea = Math.max(minArea, targetWidth * targetWidth * 2.5) * scale * scale;
   const sampleMinArea = Math.max(2, Math.round(Math.max(minArea * scale * scale, expectedArea * 0.28)));
+  // A strong local mode on the part side of Otsu gives a useful anchor when
+  // tiny-width settings would otherwise reward many thread/noise fragments.
+  const thresholdHint = histogramThresholdHint(gray, baseThreshold, expectedPolarity);
   const scores = new Map();
   const evaluate = (threshold, candidatePolarity) => {
     const key = `${candidatePolarity}:${threshold}`;
@@ -384,7 +387,9 @@ function optimizeThreshold(gray, width, height, minArea, baseThreshold, targetWi
       const center = evaluate(threshold, candidatePolarity);
       const before = evaluate(Math.max(0, threshold - 4), candidatePolarity);
       const after = evaluate(Math.min(255, threshold + 4), candidatePolarity);
-      const stableScore = center * 0.6 + before * 0.2 + after * 0.2;
+      const stableScore = center * 0.6 + before * 0.2 + after * 0.2
+        + 1.35 * thresholdStability(sample, threshold, candidatePolarity)
+        - (thresholdHint === null ? 0 : 0.08 * Math.abs(threshold - thresholdHint));
       if (stableScore > best.score) best = { score: stableScore, threshold, polarity: candidatePolarity };
     }
   }
@@ -394,10 +399,47 @@ function optimizeThreshold(gray, width, height, minArea, baseThreshold, targetWi
     const center = evaluate(threshold, best.polarity);
     const before = evaluate(Math.max(0, threshold - 1), best.polarity);
     const after = evaluate(Math.min(255, threshold + 1), best.polarity);
-    const stableScore = center * 0.6 + before * 0.2 + after * 0.2;
+    const stableScore = center * 0.6 + before * 0.2 + after * 0.2
+      + 1.35 * thresholdStability(sample, threshold, best.polarity)
+      - (thresholdHint === null ? 0 : 0.08 * Math.abs(threshold - thresholdHint));
     if (stableScore > best.score) best = { score: stableScore, threshold, polarity: best.polarity };
   }
   return best;
+}
+
+function thresholdStability(gray, threshold, polarity) {
+  let lowerMask = 0;
+  let upperMask = 0;
+  for (let i = 0; i < gray.length; i++) {
+    if (polarity === 'dark') {
+      if (gray[i] <= threshold - 4) lowerMask++;
+      if (gray[i] <= threshold + 4) upperMask++;
+    } else {
+      if (gray[i] > threshold - 4) lowerMask++;
+      if (gray[i] > threshold + 4) upperMask++;
+    }
+  }
+  return Math.min(lowerMask, upperMask) / Math.max(1, lowerMask, upperMask);
+}
+
+function histogramThresholdHint(gray, baseThreshold, polarity) {
+  const histogram = new Uint32Array(256);
+  for (let i = 0; i < gray.length; i++) {
+    const value = polarity === 'dark' ? gray[i] : 255 - gray[i];
+    histogram[value]++;
+  }
+  const smooth = new Uint32Array(256);
+  for (let value = 0; value < 256; value++) {
+    for (let delta = -4; delta <= 4; delta++) smooth[value] += histogram[Math.max(0, Math.min(255, value + delta))];
+  }
+  const transformedBase = polarity === 'dark' ? baseThreshold : 255 - baseThreshold;
+  const limit = Math.floor(transformedBase * 0.8);
+  let peak = 0;
+  for (let value = 16; value < limit; value++) {
+    if (smooth[value] > smooth[value - 1] && smooth[value] >= smooth[value + 1]) peak = value;
+  }
+  if (!peak) return null;
+  return polarity === 'dark' ? peak : 255 - peak;
 }
 
 function borderMedian(gray, width, height) {
