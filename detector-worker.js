@@ -485,8 +485,14 @@ function estimateAreaUnits(area, unitArea, tolerance) {
   let bestCount = 0;
   let bestRelativeError = Infinity;
   for (let count = 1; count <= maxUnits; count++) {
-    const relativeError = Math.abs(ratio / count - 1);
-    if (relativeError > tolerance) continue;
+    const perUnitRatio = ratio / count;
+    const absoluteError = Math.abs(perUnitRatio - 1);
+    if (absoluteError > tolerance) continue;
+    // Occlusion tends to remove visible foreground, so when two adjacent
+    // counts both fit the tolerance band, mildly prefer the higher count.
+    const relativeError = perUnitRatio < 1
+      ? (1 - perUnitRatio) * 0.8
+      : perUnitRatio - 1;
     if (relativeError < bestRelativeError - 1e-9 || (Math.abs(relativeError - bestRelativeError) <= 1e-9 && count > bestCount)) {
       bestCount = count;
       bestRelativeError = relativeError;
