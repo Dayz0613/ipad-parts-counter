@@ -63,13 +63,18 @@ function detect(rgba, width, height, settings) {
     if (on) { thresholdMask[i] = 1; thresholdForeground++; }
   }
 
-  // Remove isolated one-pixel responses before measuring regions. Keep thin lines
-  // intact; the configurable minimum area below removes larger speckle clusters.
-  const mask = removeIsolatedPixels(thresholdMask, width, height);
+  // Automatically infer the closing radius from the estimated part width.
+  const minArea = Math.max(1, Number(settings.minArea) || 12);
+  const closing = selectClosing(thresholdMask, width, height, targetWidth);
+  // Fill enclosed background pockets so the part interior becomes one solid
+  // foreground region after closing has sealed narrow openings.
+  const filledMask = fillEnclosedHoles(closing.mask, width, height);
+  // Remove isolated one-pixel responses after filling; the configurable minimum
+  // area below removes larger speckle clusters.
+  const mask = removeIsolatedPixels(filledMask, width, height);
   let foreground = 0;
   for (let i = 0; i < length; i++) if (mask[i]) foreground++;
 
-  const minArea = Math.max(1, Number(settings.minArea) || 12);
   const labels = new Int32Array(length);
   const queue = new Int32Array(length);
   const areaFilteredMask = new Uint8Array(length);
@@ -336,10 +341,160 @@ function detect(rgba, width, height, settings) {
     height,
     binaryMask: thresholdMask,
     areaFilteredMask,
+    closingRadius: closing.radius,
+    closingFilledPixels: closing.filledPixels + countForeground(filledMask) - countForeground(closing.mask),
     targetWidth,
     referenceUsed: reference ? { area: reference.area } : null,
     localThreshold: !!reference
   };
+}
+
+// Morphological closing (dilation followed by erosion) seals narrow gaps in a
+// part's binary silhouette. Kernel size is inferred from the estimated part
+// width, and enclosed background pockets are filled afterward.
+function selectClosing(source, width, height, targetWidth) {
+  const baseline = removeIsolatedPixels(source, width, height);
+  const baselineForeground = countForeground(baseline);
+  const maxRadius = Math.max(1, Math.min(50, Math.ceil(Math.max(3, targetWidth) * 6)));
+  let best = { mask: baseline, radius: 0, filledPixels: 0 };
+  const radii = [2, 4, 8, 16, 24, 32, 40, maxRadius].filter((radius, index, all) => radius <= maxRadius && all.indexOf(radius) === index);
+  for (const radius of radii) {
+    const candidate = removeIsolatedPixels(closeMask(source, width, height, radius), width, height);
+    const added = countForeground(candidate) - baselineForeground;
+    const growth = added / Math.max(1, baselineForeground);
+    // Use the largest inferred radius that keeps the total foreground growth
+    // bounded. Joining nearby regions is allowed for the requested fill effect.
+    if (growth > 2) break;
+    if (added > 0) best = { mask: candidate, radius, filledPixels: added };
+  }
+  return best;
+}
+
+function countForeground(mask) {
+  let total = 0;
+  for (let i = 0; i < mask.length; i++) total += mask[i];
+  return total;
+}
+
+function fillEnclosedHoles(mask, width, height) {
+  const outside = new Uint8Array(mask.length);
+  const queue = new Int32Array(mask.length);
+  let head = 0, tail = 0;
+  const add = (index) => {
+    if (!mask[index] && !outside[index]) {
+      outside[index] = 1;
+      queue[tail++] = index;
+    }
+  };
+  for (let x = 0; x < width; x++) { add(x); add((height - 1) * width + x); }
+  for (let y = 0; y < height; y++) { add(y * width); add(y * width + width - 1); }
+  while (head < tail) {
+    const index = queue[head++];
+    const x = index % width, y = (index / width) | 0;
+    for (let dy = -1; dy <= 1; dy++) {
+      const ny = y + dy;
+      if (ny < 0 || ny >= height) continue;
+      for (let dx = -1; dx <= 1; dx++) {
+        if (!dx && !dy) continue;
+        const nx = x + dx;
+        if (nx >= 0 && nx < width) add(ny * width + nx);
+      }
+    }
+  }
+  const filled = new Uint8Array(mask.length);
+  for (let i = 0; i < mask.length; i++) filled[i] = mask[i] || !outside[i] ? 1 : 0;
+  return filled;
+}
+
+function closeMask(source, width, height, radius) {
+  const length = width * height;
+  const dilated = new Uint8Array(length);
+  const closed = new Uint8Array(length);
+  const horizontal = new Uint8Array(length);
+  // Rectangular kernels are separable. Sliding sums keep this linear in image
+  // size, which matters on older iPads even when the inferred radius is larger.
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    let sum = 0;
+    for (let xx = 0; xx <= Math.min(radius, width - 1); xx++) sum += source[row + xx];
+    for (let x = 0; x < width; x++) {
+      horizontal[row + x] = sum > 0 ? 1 : 0;
+      const removeX = x - radius;
+      const addX = x + radius + 1;
+      if (removeX >= 0) sum -= source[row + removeX];
+      if (addX < width) sum += source[row + addX];
+    }
+  }
+  for (let x = 0; x < width; x++) {
+    let sum = 0;
+    for (let yy = 0; yy <= Math.min(radius, height - 1); yy++) sum += horizontal[yy * width + x];
+    for (let y = 0; y < height; y++) {
+      dilated[y * width + x] = sum > 0 ? 1 : 0;
+      const removeY = y - radius;
+      const addY = y + radius + 1;
+      if (removeY >= 0) sum -= horizontal[removeY * width + x];
+      if (addY < height) sum += horizontal[addY * width + x];
+    }
+  }
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    let sum = 0;
+    for (let xx = 0; xx <= Math.min(radius, width - 1); xx++) sum += dilated[row + xx];
+    for (let x = 0; x < width; x++) {
+      const windowWidth = Math.min(width - 1, x + radius) - Math.max(0, x - radius) + 1;
+      horizontal[row + x] = sum === windowWidth ? 1 : 0;
+      const removeX = x - radius;
+      const addX = x + radius + 1;
+      if (removeX >= 0) sum -= dilated[row + removeX];
+      if (addX < width) sum += dilated[row + addX];
+    }
+  }
+  for (let x = 0; x < width; x++) {
+    let sum = 0;
+    for (let yy = 0; yy <= Math.min(radius, height - 1); yy++) sum += horizontal[yy * width + x];
+    for (let y = 0; y < height; y++) {
+      const windowHeight = Math.min(height - 1, y + radius) - Math.max(0, y - radius) + 1;
+      closed[y * width + x] = sum === windowHeight ? 1 : 0;
+      const removeY = y - radius;
+      const addY = y + radius + 1;
+      if (removeY >= 0) sum -= horizontal[removeY * width + x];
+      if (addY < height) sum += horizontal[addY * width + x];
+    }
+  }
+  return closed;
+}
+
+function componentStats(mask, width, height, minArea) {
+  const visited = new Uint8Array(mask.length);
+  const queue = new Int32Array(mask.length);
+  let foreground = 0, components = 0;
+  for (let i = 0; i < mask.length; i++) if (mask[i]) foreground++;
+  for (let start = 0; start < mask.length; start++) {
+    if (!mask[start] || visited[start]) continue;
+    let head = 0, tail = 1;
+    queue[0] = start;
+    visited[start] = 1;
+    while (head < tail) {
+      const index = queue[head++];
+      const x = index % width, y = (index / width) | 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        const ny = y + dy;
+        if (ny < 0 || ny >= height) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          if (!dx && !dy) continue;
+          const nx = x + dx;
+          if (nx < 0 || nx >= width) continue;
+          const neighbor = ny * width + nx;
+          if (mask[neighbor] && !visited[neighbor]) {
+            visited[neighbor] = 1;
+            queue[tail++] = neighbor;
+          }
+        }
+      }
+    }
+    if (tail >= minArea) components++;
+  }
+  return { foreground, components };
 }
 
 // Search thresholds on a small image, then refine the best band at full
@@ -634,3 +789,4 @@ function otsuThreshold(histogram, total) {
   }
   return threshold;
 }
+
