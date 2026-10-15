@@ -355,7 +355,7 @@ function detect(rgba, width, height, settings) {
 function selectClosing(source, width, height, targetWidth) {
   const baseline = removeIsolatedPixels(source, width, height);
   const baselineForeground = countForeground(baseline);
-  const maxRadius = Math.max(1, Math.min(50, Math.ceil(Math.max(3, targetWidth) * 6)));
+  const maxRadius = Math.max(1, Math.min(35, Math.ceil(Math.max(3, targetWidth) * 6)));
   let best = { mask: baseline, radius: 0, filledPixels: 0 };
   const radii = [2, 4, 8, 16, 24, 32, 40, maxRadius].filter((radius, index, all) => radius <= maxRadius && all.indexOf(radius) === index);
   for (const radius of radii) {
