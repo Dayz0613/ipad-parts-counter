@@ -218,7 +218,7 @@ function detect(rgba, width, height, settings) {
   for (let label = 1; label < components.length; label++) {
     const component = components[label];
     if (component) component.estimatedQuantity = component.autoNoise ? 0 : unitAreaReference
-      ? Math.max(1, Math.floor(component.area / unitAreaReference + 1e-7))
+      ? estimateAreaUnits(component.area, unitAreaReference, 0.3)
       : 1;
   }
 
@@ -329,9 +329,10 @@ function detect(rgba, width, height, settings) {
     if (!component.peaks.length && component.area <= expectedArea * 2.8) {
       component.peaks.push({ x: component.cx, y: component.cy, radius: Math.sqrt(component.area / Math.PI) });
     }
-    // Use the smallest surviving component as a one-part area reference.
-    // Joined regions are estimated by whole reference-area units (floor), which
-    // avoids counting overlap and shadows as extra parts.
+    // Estimate how many reference-area units a connected region contains.
+    // Nearest-integer rounding recovers partially overlapped pairs whose union
+    // is smaller than two full silhouettes, while uncertainty flags expose
+    // the cases where overlap or shadows make this estimate ambiguous.
     const estimatedQuantity = component.estimatedQuantity || 1;
     const perItemArea = component.area / estimatedQuantity;
     const unusualArea = component.area > expectedArea * (reference ? 1.75 : 2.3);
@@ -372,7 +373,17 @@ function detect(rgba, width, height, settings) {
     const centers = estimatedQuantity === 1
       ? [{ x: component.cx, y: component.cy }]
       : component.peaks.slice(0, estimatedQuantity);
-    while (centers.length < estimatedQuantity) centers.push({ x: component.cx, y: component.cy });
+    if (centers.length < estimatedQuantity) {
+      centers.length = 0;
+      const angle = component.angle * Math.PI / 180;
+      const templateLength = Math.max(targetWidth, Number(expectedShape && expectedShape.majorAxis) || targetWidth * 2.8);
+      const spread = Math.min(component.majorAxis * 0.72, templateLength * 0.55 * (estimatedQuantity - 1));
+      const spacing = spread / Math.max(1, estimatedQuantity - 1);
+      for (let i = 0; i < estimatedQuantity; i++) {
+        const offset = (i - (estimatedQuantity - 1) / 2) * spacing;
+        centers.push({ x: component.cx + Math.cos(angle) * offset, y: component.cy + Math.sin(angle) * offset });
+      }
+    }
     for (let partIndex = 0; partIndex < estimatedQuantity; partIndex++) {
       const center = centers[partIndex];
       detections.push({
@@ -466,6 +477,22 @@ function removeSmallMaskComponents(mask, width, height, minArea) {
     }
   }
   return cleaned;
+}
+
+function estimateAreaUnits(area, unitArea, tolerance) {
+  const ratio = area / Math.max(1, unitArea);
+  const maxUnits = Math.min(50000, Math.max(1, Math.ceil(ratio / (1 - tolerance))));
+  let bestCount = 0;
+  let bestRelativeError = Infinity;
+  for (let count = 1; count <= maxUnits; count++) {
+    const relativeError = Math.abs(ratio / count - 1);
+    if (relativeError > tolerance) continue;
+    if (relativeError < bestRelativeError - 1e-9 || (Math.abs(relativeError - bestRelativeError) <= 1e-9 && count > bestCount)) {
+      bestCount = count;
+      bestRelativeError = relativeError;
+    }
+  }
+  return bestCount || Math.max(1, Math.round(ratio));
 }
 
 function findSmallNoiseComponents(components, targetWidth) {
