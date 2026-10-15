@@ -1,0 +1,485 @@
+(() => {
+  'use strict';
+
+  const $ = (id) => document.getElementById(id);
+  const els = {
+    cameraInput: $('cameraInput'), photoInput: $('photoInput'), cameraButton: $('cameraButton'), photoButton: $('photoButton'),
+    analyzeButton: $('analyzeButton'), analyzeLabel: $('analyzeLabel'), canvas: $('imageCanvas'), stage: $('stage'), emptyState: $('emptyState'),
+    countValue: $('countValue'), positionCount: $('positionCount'), uncertainCount: $('uncertainCount'), resultBadge: $('resultBadge'),
+    exportButton: $('exportButton'), statusLine: $('statusLine'), warningBanner: $('warningBanner'), warningTitle: $('warningTitle'), warningText: $('warningText'),
+    viewMode: $('viewMode'), addMode: $('addMode'), deleteMode: $('deleteMode'), modeHint: $('modeHint'), undoButton: $('undoButton'), clearEditsButton: $('clearEditsButton'),
+    partName: $('partName'), sizeRange: $('sizeRange'), sizeValue: $('sizeValue'), thresholdRange: $('thresholdRange'), thresholdValue: $('thresholdValue'),
+    polaritySelect: $('polaritySelect'), noiseRange: $('noiseRange'), noiseValue: $('noiseValue'), labelsCheck: $('labelsCheck'), saveSettingsButton: $('saveSettingsButton'), savedNote: $('savedNote'),
+    zoomIn: $('zoomIn'), zoomOut: $('zoomOut'), zoomFit: $('zoomFit'), zoomReadout: $('zoomReadout'), offlineState: $('offlineState'), offlineText: $('offlineText')
+  };
+
+  const SETTINGS_KEY = 'partsCounter.settings.v1';
+  const MAX_IMAGE_EDGE = 1400;
+  const ctx = els.canvas.getContext('2d', { alpha: false });
+  const baseCanvas = document.createElement('canvas');
+  const baseCtx = baseCanvas.getContext('2d', { willReadFrequently: true });
+  let currentImage = null;
+  let currentFileName = '';
+  let imageUrl = '';
+  let originalWidth = 0;
+  let originalHeight = 0;
+  let basePoints = [];
+  let visiblePoints = [];
+  let analysisResult = null;
+  let analysisComplete = false;
+  let processing = false;
+  let zoom = 1;
+  let mode = 'view';
+  let worker = null;
+  let activeJob = 0;
+  let history = [];
+  let adjustments = { removed: [], added: [] };
+
+  loadSettings();
+  updateSettingsLabels();
+  bindEvents();
+  updateMode();
+  updateCount();
+  registerWorker();
+  registerOfflineShell();
+
+  function bindEvents() {
+    els.cameraButton.addEventListener('click', () => els.cameraInput.click());
+    els.photoButton.addEventListener('click', () => els.photoInput.click());
+    els.cameraInput.addEventListener('change', onFileSelected);
+    els.photoInput.addEventListener('change', onFileSelected);
+    els.analyzeButton.addEventListener('click', analyze);
+    els.exportButton.addEventListener('click', exportCsv);
+    els.canvas.addEventListener('click', onCanvasClick);
+    els.viewMode.addEventListener('click', () => setMode('view'));
+    els.addMode.addEventListener('click', () => setMode('add'));
+    els.deleteMode.addEventListener('click', () => setMode('delete'));
+    els.undoButton.addEventListener('click', undoEdit);
+    els.clearEditsButton.addEventListener('click', clearEdits);
+    els.zoomIn.addEventListener('click', () => setZoom(Math.min(4, zoom * 1.25)));
+    els.zoomOut.addEventListener('click', () => setZoom(Math.max(.5, zoom / 1.25)));
+    els.zoomFit.addEventListener('click', () => setZoom(1));
+    els.saveSettingsButton.addEventListener('click', () => saveSettings(true));
+    [els.partName, els.sizeRange, els.thresholdRange, els.polaritySelect, els.noiseRange, els.labelsCheck].forEach((el) => {
+      el.addEventListener('input', onSettingsChanged);
+      el.addEventListener('change', onSettingsChanged);
+    });
+    window.addEventListener('resize', updateCanvasSize);
+    if ('ResizeObserver' in window) new ResizeObserver(updateCanvasSize).observe(els.stage);
+  }
+
+  function registerWorker() {
+    try {
+      worker = new Worker('./detector-worker.js');
+      worker.addEventListener('message', (event) => {
+        const { jobId, result, error } = event.data || {};
+        if (jobId !== activeJob) return;
+        processing = false;
+        els.analyzeButton.disabled = !currentImage;
+        els.analyzeLabel.textContent = analysisComplete ? '再解析' : '画像を解析';
+        if (error || !result) {
+          els.statusLine.textContent = `解析できませんでした: ${error || '不明なエラー'}`;
+          return;
+        }
+        analysisResult = result;
+        basePoints = result.detections.map((point, index) => ({
+          id: `auto-${index}`,
+          x: point.x,
+          y: point.y,
+          label: point.label,
+          uncertain: point.uncertain,
+          source: '自動検出'
+        }));
+        analysisComplete = true;
+        applyAdjustments();
+        els.resultBadge.textContent = '解析済み';
+        els.resultBadge.classList.add('ready');
+        els.exportButton.disabled = false;
+        const level = result.polarity === 'dark' ? '暗い部品' : '明るい部品';
+        els.statusLine.textContent = `解析完了 · 境界 ${result.threshold} · ${level} · 輪郭領域 ${result.componentCount.toLocaleString()}件`;
+        if (result.foregroundRatio > .72) {
+          els.statusLine.textContent += ' · 背景まで選ばれている可能性があります。明暗設定・境界を調整してください。';
+        }
+        updateWarning();
+        renderCanvas();
+        updateCount();
+      });
+      worker.addEventListener('error', () => {
+        processing = false;
+        els.analyzeButton.disabled = !currentImage;
+        els.analyzeLabel.textContent = analysisComplete ? '再解析' : '画像を解析';
+        els.statusLine.textContent = '画像処理を開始できません。ページを再読み込みしてからお試しください。';
+      });
+    } catch (error) {
+      worker = null;
+      els.statusLine.textContent = 'このブラウザでは画像処理を開始できません。Safariで開き直してください。';
+    }
+  }
+
+  function onFileSelected(event) {
+    const file = event.target.files && event.target.files[0];
+    event.target.value = '';
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      els.statusLine.textContent = '画像ファイルを選択してください。';
+      return;
+    }
+    if (imageUrl) URL.revokeObjectURL(imageUrl);
+    imageUrl = URL.createObjectURL(file);
+    currentFileName = file.name || '撮影画像';
+    analysisComplete = false;
+    analysisResult = null;
+    basePoints = [];
+    visiblePoints = [];
+    adjustments = { removed: [], added: [] };
+    history = [];
+    const image = new Image();
+    image.onload = () => {
+      currentImage = image;
+      originalWidth = image.naturalWidth;
+      originalHeight = image.naturalHeight;
+      prepareCanvas();
+      els.emptyState.hidden = true;
+      els.canvas.classList.add('visible');
+      els.analyzeButton.disabled = false;
+      els.analyzeLabel.textContent = '画像を解析';
+      els.exportButton.disabled = true;
+      els.resultBadge.textContent = '未解析';
+      els.resultBadge.classList.remove('ready');
+      els.warningBanner.hidden = true;
+      els.countValue.textContent = '—';
+      els.positionCount.textContent = '0';
+      els.uncertainCount.textContent = '—';
+      zoom = 1;
+      updateCanvasSize();
+      renderCanvas();
+      updateCount();
+      els.statusLine.textContent = `画像を読み込みました · ${originalWidth.toLocaleString()} × ${originalHeight.toLocaleString()} px · 「画像を解析」を押してください。`;
+    };
+    image.onerror = () => {
+      currentImage = null;
+      els.statusLine.textContent = '画像を読み込めません。JPEGまたはPNG画像でお試しください。';
+    };
+    image.src = imageUrl;
+  }
+
+  function prepareCanvas() {
+    const scale = Math.min(1, MAX_IMAGE_EDGE / Math.max(originalWidth, originalHeight));
+    const width = Math.max(1, Math.round(originalWidth * scale));
+    const height = Math.max(1, Math.round(originalHeight * scale));
+    baseCanvas.width = width;
+    baseCanvas.height = height;
+    els.canvas.width = width;
+    els.canvas.height = height;
+    baseCtx.clearRect(0, 0, width, height);
+    baseCtx.drawImage(currentImage, 0, 0, width, height);
+  }
+
+  function analyze() {
+    if (!currentImage || !worker || processing) return;
+    processing = true;
+    activeJob++;
+    const jobId = activeJob;
+    els.analyzeButton.disabled = true;
+    els.analyzeLabel.textContent = '解析中…';
+    els.statusLine.textContent = '画像を端末内で解析しています。写真の大きさにより数秒かかることがあります。';
+    window.requestAnimationFrame(() => {
+      try {
+        const pixels = baseCtx.getImageData(0, 0, baseCanvas.width, baseCanvas.height).data;
+        const shortEdge = Math.min(baseCanvas.width, baseCanvas.height);
+        worker.postMessage({
+          jobId,
+          pixels: pixels.buffer,
+          width: baseCanvas.width,
+          height: baseCanvas.height,
+          settings: {
+            targetWidth: Math.max(3, shortEdge * Number(els.sizeRange.value) / 100),
+            thresholdOffset: Number(els.thresholdRange.value),
+            polarity: els.polaritySelect.value,
+            minArea: Number(els.noiseRange.value)
+          }
+        }, [pixels.buffer]);
+      } catch (error) {
+        processing = false;
+        els.analyzeButton.disabled = false;
+        els.analyzeLabel.textContent = analysisComplete ? '再解析' : '画像を解析';
+        els.statusLine.textContent = '画像を解析できませんでした。画像サイズを小さくしてお試しください。';
+      }
+    });
+  }
+
+  function onCanvasClick(event) {
+    if (!analysisComplete || mode === 'view' || processing) return;
+    const rect = els.canvas.getBoundingClientRect();
+    const x = (event.clientX - rect.left) / rect.width * els.canvas.width;
+    const y = (event.clientY - rect.top) / rect.height * els.canvas.height;
+    if (mode === 'add') {
+      pushHistory();
+      adjustments.added.push({ id: `manual-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, nx: x / els.canvas.width, ny: y / els.canvas.height });
+      applyAdjustments();
+      els.statusLine.textContent = '手動で1個追加しました。';
+    } else if (mode === 'delete') {
+      const target = nearestPoint(x, y);
+      if (!target) {
+        els.statusLine.textContent = '近くに検出位置がありません。拡大してから位置を選んでください。';
+        return;
+      }
+      pushHistory();
+      if (target.source === '手動追加') {
+        adjustments.added = adjustments.added.filter((point) => point.id !== target.id);
+      } else {
+        adjustments.removed.push({ nx: target.x / els.canvas.width, ny: target.y / els.canvas.height });
+      }
+      applyAdjustments();
+      els.statusLine.textContent = '検出位置を1個削除しました。';
+    }
+    renderCanvas();
+    updateCount();
+    updateEditButtons();
+  }
+
+  function nearestPoint(x, y) {
+    if (!visiblePoints.length) return null;
+    const targetWidth = analysisResult ? analysisResult.targetWidth : 10;
+    const canvasScale = els.canvas.width / Math.max(1, els.canvas.clientWidth);
+    const radius = Math.max(targetWidth * .55, canvasScale * 18);
+    let nearest = null;
+    let nearestDistance = radius * radius;
+    for (const point of visiblePoints) {
+      const dx = point.x - x;
+      const dy = point.y - y;
+      const distance = dx * dx + dy * dy;
+      if (distance <= nearestDistance) { nearest = point; nearestDistance = distance; }
+    }
+    return nearest;
+  }
+
+  function applyAdjustments() {
+    const shortEdge = Math.min(els.canvas.width || 1, els.canvas.height || 1);
+    const tolerance = Math.max(5, (analysisResult ? analysisResult.targetWidth : 12) * .42);
+    const toleranceSquared = tolerance * tolerance;
+    visiblePoints = basePoints.filter((point) => !adjustments.removed.some((removed) => {
+      const dx = point.x - removed.nx * els.canvas.width;
+      const dy = point.y - removed.ny * els.canvas.height;
+      return dx * dx + dy * dy <= toleranceSquared;
+    })).map((point) => ({ ...point }));
+    for (const point of adjustments.added) {
+      visiblePoints.push({ id: point.id, x: point.nx * els.canvas.width, y: point.ny * els.canvas.height, uncertain: false, source: '手動追加' });
+    }
+    els.clearEditsButton.disabled = !adjustments.removed.length && !adjustments.added.length;
+    updateEditButtons();
+  }
+
+  function pushHistory() {
+    history.push(JSON.stringify(adjustments));
+    if (history.length > 40) history.shift();
+  }
+
+  function undoEdit() {
+    const previous = history.pop();
+    if (!previous) return;
+    adjustments = JSON.parse(previous);
+    applyAdjustments();
+    renderCanvas();
+    updateCount();
+    updateEditButtons();
+    els.statusLine.textContent = '直前の手動修正を戻しました。';
+  }
+
+  function clearEdits() {
+    if (!adjustments.removed.length && !adjustments.added.length) return;
+    pushHistory();
+    adjustments = { removed: [], added: [] };
+    applyAdjustments();
+    renderCanvas();
+    updateCount();
+    updateEditButtons();
+    els.statusLine.textContent = '手動修正をすべて戻しました。';
+  }
+
+  function renderCanvas() {
+    if (!baseCanvas.width) return;
+    ctx.clearRect(0, 0, els.canvas.width, els.canvas.height);
+    ctx.drawImage(baseCanvas, 0, 0);
+    const markerRadius = Math.max(4, Math.min(9, Math.min(els.canvas.width, els.canvas.height) * .006));
+    for (let index = 0; index < visiblePoints.length; index++) {
+      const point = visiblePoints[index];
+      const color = point.source === '手動追加' ? '#7a9cff' : point.uncertain ? '#ffc365' : '#47d4b0';
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, markerRadius, 0, Math.PI * 2);
+      ctx.fillStyle = `${color}38`;
+      ctx.fill();
+      ctx.lineWidth = Math.max(1.5, markerRadius * .32);
+      ctx.strokeStyle = color;
+      ctx.stroke();
+      if (els.labelsCheck.checked) {
+        ctx.font = `600 ${Math.max(8, markerRadius * 1.55)}px -apple-system, BlinkMacSystemFont, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#07111d';
+        ctx.fillText(String(index + 1), point.x, point.y + .4);
+      }
+    }
+  }
+
+  function updateCanvasSize() {
+    if (!baseCanvas.width) return;
+    const available = Math.max(120, els.stage.clientWidth - 2);
+    const fitWidth = Math.min(available, baseCanvas.width);
+    const displayWidth = Math.max(1, Math.round(fitWidth * zoom));
+    els.canvas.style.width = `${displayWidth}px`;
+    els.canvas.style.height = 'auto';
+    els.zoomReadout.textContent = `${Math.round(zoom * 100)}%`;
+  }
+
+  function setZoom(value) {
+    zoom = Math.max(.5, Math.min(4, value));
+    updateCanvasSize();
+  }
+
+  function setMode(nextMode) {
+    mode = nextMode;
+    updateMode();
+  }
+
+  function updateMode() {
+    const modes = [['view', els.viewMode], ['add', els.addMode], ['delete', els.deleteMode]];
+    for (const [name, button] of modes) {
+      const active = mode === name;
+      button.classList.toggle('active', active);
+      button.classList.toggle('adding', active && name === 'add');
+      button.classList.toggle('deleting', active && name === 'delete');
+      button.setAttribute('aria-pressed', String(active));
+    }
+    els.canvas.style.cursor = mode === 'add' ? 'copy' : mode === 'delete' ? 'not-allowed' : 'grab';
+    els.modeHint.textContent = mode === 'add' ? '画像上の部品の中心をタップすると1個追加します。' : mode === 'delete' ? '削除する検出位置をタップします。細かい場所は拡大してください。' : '検出位置を拡大して確認できます。';
+  }
+
+  function updateEditButtons() {
+    els.undoButton.disabled = history.length === 0;
+    els.clearEditsButton.disabled = !adjustments.removed.length && !adjustments.added.length;
+  }
+
+  function updateCount() {
+    els.positionCount.textContent = visiblePoints.length.toLocaleString();
+    if (analysisComplete) els.countValue.textContent = visiblePoints.length.toLocaleString();
+  }
+
+  function updateWarning() {
+    if (!analysisResult) {
+      els.warningBanner.hidden = true;
+      return;
+    }
+    const warnings = analysisResult.warningCount;
+    const dense = analysisResult.foregroundRatio > .72;
+    els.warningBanner.hidden = warnings === 0 && !dense && !analysisResult.candidateLimitReached;
+    if (dense) {
+      els.warningTitle.textContent = '背景まで検出している可能性があります';
+      els.warningText.textContent = '明暗設定や「明るさの境界」を調整して再解析してください。検出位置が全体に広がっているときは、特に確認が必要です。';
+    } else if (warnings > 0) {
+      els.warningTitle.textContent = `接触・重なりの可能性がある領域: ${warnings.toLocaleString()}箇所`;
+      els.warningText.textContent = '黄色の位置を拡大して確認してください。輪郭がつながった部品は自動で分けきれないことがあり、検出位置の数は実物の数量を保証しません。追加・削除モードで修正できます。';
+    } else if (analysisResult.candidateLimitReached) {
+      els.warningTitle.textContent = '検出候補が多すぎます';
+      els.warningText.textContent = '画像にノイズや模様が多く、処理上限に達しました。部品の幅、明暗設定、ノイズ除去を調整して再解析してください。';
+    }
+    els.uncertainCount.textContent = warnings.toLocaleString();
+  }
+
+  function updateSettingsLabels() {
+    els.sizeValue.textContent = `${Number(els.sizeRange.value).toFixed(1)}%`;
+    els.thresholdValue.textContent = `${Number(els.thresholdRange.value) > 0 ? '+' : ''}${els.thresholdRange.value}`;
+    els.noiseValue.textContent = `${els.noiseRange.value} px²`;
+  }
+
+  function onSettingsChanged() {
+    updateSettingsLabels();
+    saveSettings(false);
+    if (analysisComplete) {
+      els.statusLine.textContent = '設定を変更しました。「再解析」を押すと新しい設定が反映されます。';
+      els.analyzeLabel.textContent = '再解析';
+      els.analyzeButton.disabled = false;
+    }
+    renderCanvas();
+  }
+
+  function saveSettings(showMessage) {
+    const settings = {
+      partName: els.partName.value,
+      sizePct: els.sizeRange.value,
+      thresholdOffset: els.thresholdRange.value,
+      polarity: els.polaritySelect.value,
+      minArea: els.noiseRange.value,
+      labels: els.labelsCheck.checked
+    };
+    try {
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+      els.savedNote.textContent = showMessage ? '設定をこの端末に保存しました。' : '設定はこの端末に自動保存されます。';
+    } catch (error) {
+      els.savedNote.textContent = 'このブラウザでは設定を保存できません。';
+    }
+  }
+
+  function loadSettings() {
+    try {
+      const settings = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
+      if (settings.partName) els.partName.value = settings.partName;
+      if (settings.sizePct) els.sizeRange.value = settings.sizePct;
+      if (settings.thresholdOffset !== undefined) els.thresholdRange.value = settings.thresholdOffset;
+      if (settings.polarity) els.polaritySelect.value = settings.polarity;
+      if (settings.minArea) els.noiseRange.value = settings.minArea;
+      if (settings.labels !== undefined) els.labelsCheck.checked = settings.labels;
+    } catch (error) { /* 初回または保存値が壊れている場合は標準値を使う */ }
+  }
+
+  function exportCsv() {
+    if (!analysisComplete) return;
+    const timestamp = new Date().toISOString();
+    const rows = [[
+      '部品名', '元画像', '最終数量', '番号', '元画像X(px)', '元画像Y(px)', 'X(%)', 'Y(%)', '検出方法', '要確認', '解析日時', '明るさ境界', '明暗設定'
+    ]];
+    const scaleX = originalWidth / Math.max(1, els.canvas.width);
+    const scaleY = originalHeight / Math.max(1, els.canvas.height);
+    visiblePoints.forEach((point, index) => {
+      const x = point.x * scaleX;
+      const y = point.y * scaleY;
+      rows.push([
+        els.partName.value || '', currentFileName, visiblePoints.length, index + 1,
+        Math.round(x), Math.round(y), (x / originalWidth * 100).toFixed(2), (y / originalHeight * 100).toFixed(2),
+        point.source, point.uncertain ? '要確認' : '', timestamp, analysisResult.threshold,
+        analysisResult.polarity === 'dark' ? '暗い部品' : '明るい部品'
+      ]);
+    });
+    const csv = '\ufeff' + rows.map((row) => row.map(csvCell).join(',')).join('\r\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    const safeName = (els.partName.value || '部品').replace(/[\\/:*?"<>|]/g, '_').slice(0, 30);
+    anchor.href = url;
+    anchor.download = `部品カウント_${safeName}_${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+  }
+
+  function csvCell(value) {
+    const text = String(value ?? '');
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+
+  function registerOfflineShell() {
+    if (!('serviceWorker' in navigator) || location.protocol === 'file:') {
+      els.offlineState.classList.add('pending');
+      els.offlineText.textContent = 'HTTPSで開くとオフライン利用可';
+      return;
+    }
+    navigator.serviceWorker.register('./service-worker.js').then(() => navigator.serviceWorker.ready).then(() => {
+      els.offlineState.classList.add('ready');
+      els.offlineText.textContent = 'オフライン利用の準備OK';
+    }).catch(() => {
+      els.offlineState.classList.add('failed');
+      els.offlineText.textContent = 'オフライン準備に失敗';
+    });
+  }
+})();

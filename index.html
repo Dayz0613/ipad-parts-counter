@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b1625">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="部品カウンター">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="apple-touch-icon" sizes="180x180" href="./apple-touch-icon.png">
+  <link rel="icon" href="./icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./styles.css">
+  <title>部品カウンター</title>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="./" aria-label="部品カウンター ホーム">
+        <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></span>
+        <span><strong>部品カウンター</strong><small>ローカル画像カウント MVP</small></span>
+      </a>
+      <div class="privacy-pill"><span class="privacy-dot"></span>画像はこの端末内で処理</div>
+    </header>
+
+    <main>
+      <section class="intro">
+        <div>
+          <p class="eyebrow">AIなし · オフライン対応</p>
+          <h1>同じ部品を、まとめて数える。</h1>
+          <p class="intro-copy">トレーを撮影、または写真を選択。検出位置を見ながら、タップで数を直せます。</p>
+        </div>
+        <div class="offline-state" id="offlineState"><span class="state-dot"></span><span id="offlineText">オフライン準備中</span></div>
+      </section>
+
+      <section class="workspace">
+        <section class="viewer-card card">
+          <div class="card-heading viewer-heading">
+            <div>
+              <p class="section-kicker">01 / 画像</p>
+              <h2>トレーを撮影</h2>
+            </div>
+            <div class="image-tools">
+              <button class="icon-button" id="zoomOut" type="button" aria-label="縮小" title="縮小">−</button>
+              <button class="fit-button" id="zoomFit" type="button">全体表示</button>
+              <button class="icon-button" id="zoomIn" type="button" aria-label="拡大" title="拡大">＋</button>
+            </div>
+          </div>
+
+          <div class="image-actions">
+            <button class="button button-primary" id="cameraButton" type="button"><span class="button-icon" aria-hidden="true">◎</span>カメラで撮影</button>
+            <button class="button button-secondary" id="photoButton" type="button"><span class="button-icon" aria-hidden="true">▧</span>写真を選ぶ</button>
+            <button class="button button-analyze" id="analyzeButton" type="button" disabled><span class="button-icon" aria-hidden="true">✳</span><span id="analyzeLabel">画像を解析</span></button>
+            <input id="cameraInput" class="visually-hidden" type="file" accept="image/*" capture="environment" aria-label="カメラで撮影">
+            <input id="photoInput" class="visually-hidden" type="file" accept="image/*" aria-label="写真を選ぶ">
+          </div>
+
+          <div class="stage" id="stage" aria-label="画像と検出位置">
+            <div class="empty-state" id="emptyState">
+              <div class="empty-illustration" aria-hidden="true">
+                <div class="empty-tray"><i></i><i></i><i></i><i></i><i></i><i></i><b>+</b></div>
+              </div>
+              <strong>写真を追加してください</strong>
+              <span>部品が重ならないよう、トレー全体を真上から撮ると調整しやすくなります。</span>
+            </div>
+            <canvas id="imageCanvas" class="image-canvas" aria-label="検出位置。追加または削除モードでタップして編集"></canvas>
+          </div>
+
+          <div class="viewer-footer">
+            <div class="legend"><span><i class="legend-dot detected"></i>検出</span><span><i class="legend-dot uncertain"></i>要確認</span><span><i class="legend-dot manual"></i>手動追加</span></div>
+            <div class="zoom-readout" id="zoomReadout">100%</div>
+          </div>
+          <div class="status-line" id="statusLine" role="status" aria-live="polite">画像を選択すると、解析を開始できます。</div>
+        </section>
+
+        <aside class="side-column">
+          <section class="count-card card" aria-live="polite">
+            <div class="count-topline"><span class="section-kicker">02 / 計数結果</span><span class="result-badge" id="resultBadge">未解析</span></div>
+            <div class="count-number-row"><strong id="countValue">—</strong><span>個</span></div>
+            <div class="count-divider"></div>
+            <div class="count-details"><span>検出した位置</span><strong id="positionCount">0</strong></div>
+            <div class="count-details"><span>要確認の領域</span><strong id="uncertainCount">—</strong></div>
+            <div class="confidence-note" id="confidenceNote">実物写真での計数精度は未検証です。必ず検出位置を確認してください。</div>
+            <button class="button button-export" id="exportButton" type="button" disabled>CSVを書き出す <span aria-hidden="true">↓</span></button>
+          </section>
+
+          <section class="edit-card card">
+            <div class="card-heading compact-heading">
+              <div><p class="section-kicker">03 / 手動修正</p><h2>数を調整</h2></div>
+              <button class="text-button" id="undoButton" type="button" disabled>1つ戻す</button>
+            </div>
+            <div class="mode-switch" role="group" aria-label="画像の編集モード">
+              <button class="mode-button active" id="viewMode" type="button" aria-pressed="true">見る</button>
+              <button class="mode-button" id="addMode" type="button" aria-pressed="false">＋ 追加</button>
+              <button class="mode-button" id="deleteMode" type="button" aria-pressed="false">− 削除</button>
+            </div>
+            <p class="mode-hint" id="modeHint">検出位置を拡大して確認できます。</p>
+            <button class="button button-quiet" id="clearEditsButton" type="button" disabled>手動修正をすべて戻す</button>
+          </section>
+
+          <details class="settings-card card" id="settingsPanel">
+            <summary>
+              <span><span class="section-kicker">04 / 調整</span><strong>解析設定</strong></span>
+              <span class="chevron" aria-hidden="true">⌄</span>
+            </summary>
+            <div class="settings-body">
+              <label class="field-label" for="partName">部品名</label>
+              <input class="text-input" id="partName" type="text" maxlength="40" placeholder="例：M3ナット">
+
+              <div class="range-heading"><label class="field-label" for="sizeRange">部品のおおよその幅</label><output id="sizeValue">2.8%</output></div>
+              <input class="range-input" id="sizeRange" type="range" min="0.8" max="8" step="0.2" value="2.8">
+              <p class="field-help">画像の短辺に対する幅。小さい部品は左へ調整します。</p>
+
+              <div class="range-heading"><label class="field-label" for="thresholdRange">明るさの境界</label><output id="thresholdValue">0</output></div>
+              <input class="range-input" id="thresholdRange" type="range" min="-55" max="55" step="1" value="0">
+              <p class="field-help">部品が欠けるときは調整し、背景まで検出したら反対方向へ戻します。</p>
+
+              <label class="field-label" for="polaritySelect">部品とトレーの明暗</label>
+              <select class="text-input" id="polaritySelect">
+                <option value="auto">自動</option>
+                <option value="bright">部品が明るい</option>
+                <option value="dark">部品が暗い</option>
+              </select>
+
+              <div class="range-heading"><label class="field-label" for="noiseRange">小さなノイズを除去</label><output id="noiseValue">12 px²</output></div>
+              <input class="range-input" id="noiseRange" type="range" min="3" max="80" step="1" value="12">
+
+              <label class="check-row"><input id="labelsCheck" type="checkbox"><span>位置に番号を表示</span></label>
+              <button class="button button-save" id="saveSettingsButton" type="button">設定を保存</button>
+              <div class="saved-note" id="savedNote" aria-live="polite">設定はこの端末に保存されます。</div>
+            </div>
+          </details>
+        </aside>
+      </section>
+
+      <section class="warning-banner" id="warningBanner" hidden>
+        <span class="warning-symbol" aria-hidden="true">!</span>
+        <div><strong id="warningTitle">接触・重なりの可能性があります</strong><p id="warningText"></p></div>
+      </section>
+      <p class="privacy-footnote"><span class="lock-icon" aria-hidden="true">▣</span>画像解析は端末内で行います。画像をサーバーへ送信しません。設定のみ、この端末に保存します。</p>
+    </main>
+    <footer class="app-footer"><span>部品カウンター MVP</span><span>AIなし · 端末内画像処理</span></footer>
+  </div>
+  <script src="./app.js" defer></script>
+</body>
+</html>
