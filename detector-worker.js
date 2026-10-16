@@ -806,6 +806,13 @@ function optimizeThreshold(gray, width, height, minArea, baseThreshold, targetWi
     if (!scores.has(key)) scores.set(key, scoreThreshold(sample, sampleWidth, sampleHeight, threshold, candidatePolarity, sampleMinArea, sampleTargetWidth));
     return scores.get(key);
   };
+  const structures = new Map();
+  const getStructure = (threshold, candidatePolarity) => {
+    const clamped = Math.max(0, Math.min(255, threshold));
+    const key = `${candidatePolarity}:${clamped}`;
+    if (!structures.has(key)) structures.set(key, thresholdComponentSignature(sample, sampleWidth, sampleHeight, clamped, candidatePolarity, sampleMinArea));
+    return structures.get(key);
+  };
 
   let best = { score: -Infinity, threshold: baseThreshold, polarity: expectedPolarity };
   for (const candidatePolarity of [expectedPolarity]) {
@@ -814,7 +821,7 @@ function optimizeThreshold(gray, width, height, minArea, baseThreshold, targetWi
       const before = evaluate(Math.max(0, threshold - 4), candidatePolarity);
       const after = evaluate(Math.min(255, threshold + 4), candidatePolarity);
       const stableScore = center * 0.6 + before * 0.2 + after * 0.2
-        + 1.35 * thresholdStability(sample, threshold, candidatePolarity)
+        + 1.35 * thresholdStructureStability(getStructure(threshold - 4, candidatePolarity), getStructure(threshold + 4, candidatePolarity), sampleTargetWidth)
         - (thresholdHint === null ? 0 : 0.08 * Math.abs(threshold - thresholdHint));
       if (stableScore > best.score) best = { score: stableScore, threshold, polarity: candidatePolarity };
     }
@@ -826,26 +833,104 @@ function optimizeThreshold(gray, width, height, minArea, baseThreshold, targetWi
     const before = evaluate(Math.max(0, threshold - 1), best.polarity);
     const after = evaluate(Math.min(255, threshold + 1), best.polarity);
     const stableScore = center * 0.6 + before * 0.2 + after * 0.2
-      + 1.35 * thresholdStability(sample, threshold, best.polarity)
+      + 1.35 * thresholdStructureStability(getStructure(threshold - 1, best.polarity), getStructure(threshold + 1, best.polarity), sampleTargetWidth)
       - (thresholdHint === null ? 0 : 0.08 * Math.abs(threshold - thresholdHint));
     if (stableScore > best.score) best = { score: stableScore, threshold, polarity: best.polarity };
   }
   return best;
 }
 
-function thresholdStability(gray, threshold, polarity) {
-  let lowerMask = 0;
-  let upperMask = 0;
-  for (let i = 0; i < gray.length; i++) {
-    if (polarity === 'dark') {
-      if (gray[i] <= threshold - 4) lowerMask++;
-      if (gray[i] <= threshold + 4) upperMask++;
-    } else {
-      if (gray[i] > threshold - 4) lowerMask++;
-      if (gray[i] > threshold + 4) upperMask++;
-    }
+function thresholdStructureStability(lower, upper, targetWidth) {
+  // Pixel counts can stay almost unchanged while a thin part fragments or
+  // joins its neighbor. Compare connected part-like regions on both sides of
+  // the candidate threshold instead.
+  if (!lower.length && !upper.length) return 0;
+
+  const maxDistance = Math.max(2, targetWidth * 0.75);
+  const buckets = new Map();
+  for (let j = 0; j < upper.length; j++) {
+    const cellX = Math.floor(upper[j].cx / maxDistance);
+    const cellY = Math.floor(upper[j].cy / maxDistance);
+    const key = `${cellX}:${cellY}`;
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key).push(j);
   }
-  return Math.min(lowerMask, upperMask) / Math.max(1, lowerMask, upperMask);
+  const usedLower = new Uint8Array(lower.length);
+  const usedUpper = new Uint8Array(upper.length);
+  let matchedQuality = 0;
+  let matches = 0;
+  for (let i = 0; i < lower.length; i++) {
+    const a = lower[i];
+    const cellX = Math.floor(a.cx / maxDistance);
+    const cellY = Math.floor(a.cy / maxDistance);
+    let bestIndex = -1;
+    let bestQuality = 0;
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const candidates = buckets.get(`${cellX + dx}:${cellY + dy}`) || [];
+        for (const j of candidates) {
+          if (usedUpper[j]) continue;
+          const b = upper[j];
+          const distance = Math.hypot(a.cx - b.cx, a.cy - b.cy);
+          const areaDifference = Math.abs(Math.log(Math.max(1, a.area) / Math.max(1, b.area)));
+          if (distance > maxDistance || areaDifference > 1.6) continue;
+          const quality = 0.55 * Math.max(0, 1 - distance / maxDistance) + 0.45 * Math.exp(-areaDifference * 0.45);
+          if (quality > bestQuality) { bestQuality = quality; bestIndex = j; }
+        }
+      }
+    }
+    if (bestIndex < 0) continue;
+    usedLower[i] = 1;
+    usedUpper[bestIndex] = 1;
+    matchedQuality += bestQuality;
+    matches++;
+  }
+  const coverage = (2 * matches) / Math.max(1, lower.length + upper.length);
+  const pairQuality = matchedQuality / Math.max(1, matches);
+  return coverage * pairQuality;
+}
+
+function thresholdComponentSignature(gray, width, height, threshold, polarity, minArea) {
+  const raw = new Uint8Array(gray.length);
+  for (let i = 0; i < gray.length; i++) {
+    raw[i] = polarity === 'dark' ? (gray[i] <= threshold ? 1 : 0) : (gray[i] > threshold ? 1 : 0);
+  }
+  const mask = removeIsolatedPixels(raw, width, height);
+  const visited = new Uint8Array(mask.length);
+  const queue = new Int32Array(mask.length);
+  const components = [];
+  for (let start = 0; start < mask.length; start++) {
+    if (!mask[start] || visited[start]) continue;
+    let head = 0;
+    let tail = 0;
+    queue[tail++] = start;
+    visited[start] = 1;
+    let sumX = 0;
+    let sumY = 0;
+    while (head < tail) {
+      const index = queue[head++];
+      const x = index % width;
+      const y = (index / width) | 0;
+      sumX += x;
+      sumY += y;
+      for (let dy = -1; dy <= 1; dy++) {
+        const ny = y + dy;
+        if (ny < 0 || ny >= height) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          if (!dx && !dy) continue;
+          const nx = x + dx;
+          if (nx < 0 || nx >= width) continue;
+          const neighbor = ny * width + nx;
+          if (mask[neighbor] && !visited[neighbor]) {
+            visited[neighbor] = 1;
+            queue[tail++] = neighbor;
+          }
+        }
+      }
+    }
+    if (tail >= minArea) components.push({ area: tail, cx: sumX / tail, cy: sumY / tail });
+  }
+  return components;
 }
 
 function histogramThresholdHint(gray, baseThreshold, polarity) {
