@@ -40,7 +40,13 @@ function detect(rgba, width, height, settings) {
     const backgroundLevel = reference ? null : borderMedian(gray, width, height);
     const expectedPartPolarity = reference ? reference.polarity : (backgroundLevel > baseThreshold ? 'dark' : 'bright');
     partPolarity = expectedPartPolarity;
-    thresholdGray = createLocalContrast(gray, width, height, targetWidth, expectedPartPolarity);
+    // Keep the illumination/background estimate wide enough even when the
+    // user enters a very small part width. A window tied only to that value
+    // follows screw threads and reflective edges, fragmenting the silhouette.
+    // The part-width setting still controls geometric filtering and counting;
+    // this floor applies only to the local contrast normalization scale.
+    const contrastWindowWidth = Math.max(targetWidth, Math.min(width, height) * 0.02);
+    thresholdGray = createLocalContrast(gray, width, height, contrastWindowWidth, expectedPartPolarity);
     const contrastHistogram = new Uint32Array(256);
     for (let i = 0; i < length; i++) contrastHistogram[thresholdGray[i]]++;
     const contrastBase = otsuThreshold(contrastHistogram, length);
@@ -297,7 +303,16 @@ function detect(rgba, width, height, settings) {
   candidates.sort((a, b) => b.distance - a.distance);
 
   const buckets = new Map();
+  const referenceMajorAxis = reference ? Number(reference.majorAxis) : firstPartComponent && firstPartComponent.majorAxis;
   const referenceMinorAxis = reference ? Number(reference.minorAxis) : firstPartComponent && firstPartComponent.minorAxis;
+  if (referenceMajorAxis > 0 && referenceMinorAxis > 0) {
+    const referenceAxisArea = referenceMajorAxis * referenceMinorAxis;
+    for (let label = 1; label < components.length; label++) {
+      const component = components[label];
+      if (!component || component.autoNoise) continue;
+      component.shapeCapacity = Math.floor((component.majorAxis * component.minorAxis) / referenceAxisArea);
+    }
+  }
   const minSeparation = Math.max(10, referenceMinorAxis ? referenceMinorAxis * 0.9 : targetWidth * 0.7);
   const minSeparationSquared = minSeparation * minSeparation;
   const minPeakRadius = Math.max(2, referenceMinorAxis ? referenceMinorAxis * 0.36 : targetWidth * 0.22);
@@ -336,9 +351,11 @@ function detect(rgba, width, height, settings) {
     // A connected group can hide one interior maximum where parts touch. If
     // nearly every area-based item has a distinct peak and the visible area
     // still supports one more item, allow that single cautious recovery.
+    const peakEvidenceForOneMore = component.peaks.length >= areaQuantity - 1;
+    const shapeEvidenceForOneMore = component.shapeCapacity === areaQuantity + 1;
     const recoverOneMissedPeak = areaQuantity > 1
       && maximumSupportedQuantity > areaQuantity
-      && component.peaks.length >= areaQuantity - 1;
+      && (peakEvidenceForOneMore || shapeEvidenceForOneMore);
     const peakGapQuantity = recoverOneMissedPeak ? areaQuantity + 1 : areaQuantity;
     component.estimatedQuantity = Math.max(areaQuantity, peakSupportedQuantity, peakGapQuantity);
   }
