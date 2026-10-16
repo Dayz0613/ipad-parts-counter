@@ -6,6 +6,7 @@
     cameraInput: $('cameraInput'), photoInput: $('photoInput'), cameraButton: $('cameraButton'), photoButton: $('photoButton'),
     analyzeButton: $('analyzeButton'), analyzeLabel: $('analyzeLabel'), canvas: $('imageCanvas'), stage: $('stage'), emptyState: $('emptyState'),
     originalView: $('originalView'), binaryView: $('binaryView'), cleanedView: $('cleanedView'),
+    shadowRegionsToggle: $('shadowRegionsToggle'),
     countValue: $('countValue'), positionCount: $('positionCount'), areaCandidateCount: $('areaCandidateCount'), uncertainCount: $('uncertainCount'), resultBadge: $('resultBadge'),
     exportButton: $('exportButton'), statusLine: $('statusLine'), warningBanner: $('warningBanner'), warningTitle: $('warningTitle'), warningText: $('warningText'),
     viewMode: $('viewMode'), referenceMode: $('referenceMode'), addMode: $('addMode'), deleteMode: $('deleteMode'), modeHint: $('modeHint'), referenceSummary: $('referenceSummary'), clearReferenceButton: $('clearReferenceButton'), undoButton: $('undoButton'), clearEditsButton: $('clearEditsButton'),
@@ -59,6 +60,7 @@
     els.originalView.addEventListener('click', () => setPreviewMode('original'));
     els.binaryView.addEventListener('click', () => setPreviewMode('binary'));
     els.cleanedView.addEventListener('click', () => setPreviewMode('cleaned'));
+    els.shadowRegionsToggle.addEventListener('change', renderCanvas);
     els.exportButton.addEventListener('click', exportCsv);
     els.canvas.addEventListener('click', onCanvasClick);
     els.viewMode.addEventListener('click', () => setMode('view'));
@@ -89,7 +91,7 @@
 
   function registerWorker() {
     try {
-      worker = new Worker('./detector-worker.js?v=29');
+      worker = new Worker('./detector-worker.js?v=30');
       worker.addEventListener('message', (event) => {
         const { jobId, result, error } = event.data || {};
         if (jobId !== activeJob) return;
@@ -105,6 +107,7 @@
         renderMaskPreview(cleanedCanvas, cleanedCtx, result.areaFilteredMask, result.width, result.height);
         els.binaryView.disabled = false;
         els.cleanedView.disabled = false;
+        els.shadowRegionsToggle.disabled = false;
         basePoints = result.detections.map((point, index) => ({
           id: `auto-${index}`,
           x: point.x,
@@ -136,10 +139,13 @@
         const shadowNote = result.shadowEdgeThreshold === null || result.shadowEdgeThreshold === undefined
           ? ''
           : ` · 影除外の輪郭基準 ${result.shadowEdgeThreshold}`;
+        const shadowRegionsNote = result.shadowRegions && result.shadowRegions.length
+          ? ` · 影候補 ${result.shadowRegions.length}箇所を赤枠表示（要確認）`
+          : ' · 影候補の赤枠なし';
         const previewNoiseNote = result.binaryPreviewRemovedPixels ? ` · 二値画像の小領域ノイズ ${result.binaryPreviewRemovedPixels.toLocaleString()}画素を除去` : '';
         const closingNote = result.closingRadius ? ` · 自動膨張収縮 半径${result.closingRadius}px（領域数の安定から選択）・塗り足し${result.closingFilledPixels.toLocaleString()}画素` : ' · 自動膨張収縮 なし（合体・膨張を避けました）';
         const smallNoiseNote = result.autoNoiseComponentCount ? ` · 小さなノイズ候補を自動除外 ${result.autoNoiseComponentCount}領域` : '';
-        els.statusLine.textContent = `解析完了 · ${binarization} ${result.threshold}${shadowNote}${previewNoiseNote} · 孤立ノイズ ${result.removedNoisePixels.toLocaleString()}画素を除去${closingNote} · 面積 ${result.minArea} px²未満 ${result.rejectedSmallComponentCount.toLocaleString()}領域を除外${smallNoiseNote} · 輪郭候補 ${result.componentCount.toLocaleString()}件${firstPartNote} · ${level}${referenceNote}`;
+        els.statusLine.textContent = `解析完了 · ${binarization} ${result.threshold}${shadowNote}${shadowRegionsNote}${previewNoiseNote} · 孤立ノイズ ${result.removedNoisePixels.toLocaleString()}画素を除去${closingNote} · 面積 ${result.minArea} px²未満 ${result.rejectedSmallComponentCount.toLocaleString()}領域を除外${smallNoiseNote} · 輪郭候補 ${result.componentCount.toLocaleString()}件${firstPartNote} · ${level}${referenceNote}`;
         if (result.foregroundRatio > .72) {
           els.statusLine.textContent += ' · 背景まで選ばれている可能性があります。明暗設定・境界を調整してください。';
         }
@@ -175,6 +181,7 @@
     previewMode = 'original';
     els.binaryView.disabled = true;
     els.cleanedView.disabled = true;
+    els.shadowRegionsToggle.disabled = true;
     updatePreviewButtons();
     basePoints = [];
     visiblePoints = [];
@@ -356,6 +363,7 @@
     ctx.clearRect(0, 0, els.canvas.width, els.canvas.height);
     const sourceCanvas = previewMode === 'binary' ? binaryCanvas : previewMode === 'cleaned' ? cleanedCanvas : baseCanvas;
     ctx.drawImage(sourceCanvas, 0, 0);
+    if (analysisResult && els.shadowRegionsToggle.checked) drawShadowRegions();
     if (previewMode !== 'original') return;
     const markerRadius = Math.max(4, Math.min(9, Math.min(els.canvas.width, els.canvas.height) * .006));
     for (let index = 0; index < visiblePoints.length; index++) {
@@ -376,6 +384,18 @@
         ctx.fillText(String(index + 1), point.x, point.y + .4);
       }
     }
+  }
+
+  function drawShadowRegions() {
+    const regions = analysisResult.shadowRegions || [];
+    if (!regions.length) return;
+    ctx.save();
+    ctx.lineWidth = Math.max(1.5, Math.min(4, Math.min(els.canvas.width, els.canvas.height) * 0.0018));
+    ctx.strokeStyle = '#ff3434';
+    for (const region of regions) {
+      ctx.strokeRect(region.x, region.y, region.width, region.height);
+    }
+    ctx.restore();
   }
 
   function renderMaskPreview(canvas, context, mask, width, height) {
@@ -636,7 +656,7 @@
       els.offlineText.textContent = 'HTTPSで開くとオフライン利用可';
       return;
     }
-    navigator.serviceWorker.register('./service-worker.js?v=29').then(() => navigator.serviceWorker.ready).then(() => {
+    navigator.serviceWorker.register('./service-worker.js?v=30').then(() => navigator.serviceWorker.ready).then(() => {
       els.offlineState.classList.add('ready');
       els.offlineText.textContent = 'オフライン利用の準備OK';
     }).catch(() => {

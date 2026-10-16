@@ -75,6 +75,8 @@ function detect(rgba, width, height, settings) {
     ? estimateShadowEdgeThreshold(gray, thresholdGray, threshold, width, height)
     : null;
   const thresholdMask = new Uint8Array(length);
+  const shadowCandidateMask = shadowEdge ? new Uint8Array(length) : null;
+  const shadowContrastBand = shadowEdge ? Math.max(10, Math.round(shadowEdge.threshold * 0.8)) : 0;
   let thresholdForeground = 0;
   const darkParts = polarity === 'dark';
   for (let i = 0; i < length; i++) {
@@ -92,8 +94,14 @@ function detect(rgba, width, height, settings) {
     if (on && (!shadowEdge || clearPartContrast || hasPartLikeEdge)) {
       thresholdMask[i] = 1;
       thresholdForeground++;
+    } else if (shadowCandidateMask) {
+      const weakEdge = shadowEdge.strength[i] < shadowEdge.threshold * 0.55;
+      if (value < pixelThreshold && value >= pixelThreshold - shadowContrastBand && weakEdge) shadowCandidateMask[i] = 1;
     }
   }
+  const shadowRegions = shadowCandidateMask
+    ? findShadowRegions(shadowCandidateMask, thresholdMask, width, height, targetWidth)
+    : [];
 
   // Automatically infer the closing radius from the estimated part width.
   const minArea = Math.max(1, Number(settings.minArea) || 12);
@@ -318,14 +326,6 @@ function detect(rgba, width, height, settings) {
   const buckets = new Map();
   const referenceMajorAxis = reference ? Number(reference.majorAxis) : firstPartComponent && firstPartComponent.majorAxis;
   const referenceMinorAxis = reference ? Number(reference.minorAxis) : firstPartComponent && firstPartComponent.minorAxis;
-  if (referenceMajorAxis > 0 && referenceMinorAxis > 0) {
-    const referenceAxisArea = referenceMajorAxis * referenceMinorAxis;
-    for (let label = 1; label < components.length; label++) {
-      const component = components[label];
-      if (!component || component.autoNoise) continue;
-      component.shapeCapacity = Math.floor((component.majorAxis * component.minorAxis) / referenceAxisArea);
-    }
-  }
   const minSeparation = Math.max(10, referenceMinorAxis ? referenceMinorAxis * 0.9 : targetWidth * 0.7);
   const minSeparationSquared = minSeparation * minSeparation;
   const minPeakRadius = Math.max(2, referenceMinorAxis ? referenceMinorAxis * 0.36 : targetWidth * 0.22);
@@ -361,16 +361,10 @@ function detect(rgba, width, height, settings) {
     const areaQuantity = component.areaEstimatedQuantity || 1;
     const maximumSupportedQuantity = component.maximumSupportedQuantity || areaQuantity;
     const peakSupportedQuantity = Math.min(maximumSupportedQuantity, component.peaks.length);
-    // A connected group can hide one interior maximum where parts touch. If
-    // nearly every area-based item has a distinct peak and the visible area
-    // still supports one more item, allow that single cautious recovery.
-    const peakEvidenceForOneMore = component.peaks.length >= areaQuantity - 1;
-    const shapeEvidenceForOneMore = component.shapeCapacity === areaQuantity + 1;
-    const recoverOneMissedPeak = areaQuantity > 1
-      && maximumSupportedQuantity > areaQuantity
-      && (peakEvidenceForOneMore || shapeEvidenceForOneMore);
-    const peakGapQuantity = recoverOneMissedPeak ? areaQuantity + 1 : areaQuantity;
-    component.estimatedQuantity = Math.max(areaQuantity, peakSupportedQuantity, peakGapQuantity);
+    // Do not invent another item from the bounding-box shape alone. Contact
+    // shadows can make a merged component look large; an extra count needs
+    // either enough area or a distinct interior peak to support it.
+    component.estimatedQuantity = Math.max(areaQuantity, peakSupportedQuantity);
   }
 
   const detections = [];
@@ -492,6 +486,7 @@ function detect(rgba, width, height, settings) {
     width,
     height,
     shadowEdgeThreshold: shadowEdge ? shadowEdge.threshold : null,
+    shadowRegions,
     binaryMask: binaryPreviewMask,
     areaFilteredMask,
     closingRadius: closing.radius,
@@ -540,6 +535,106 @@ function estimateShadowEdgeThreshold(gray, contrast, threshold, width, height) {
     }
   }
   return { strength, threshold: thresholdEdge };
+}
+
+function findShadowRegions(shadowMask, partMask, width, height, targetWidth) {
+  const shadowCore = new Uint8Array(shadowMask.length);
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    for (let x = 0; x < width; x++) {
+      const index = row + x;
+      if (!shadowMask[index]) continue;
+      let touchesPart = false;
+      for (let dy = -1; dy <= 1 && !touchesPart; dy++) {
+        const ny = y + dy;
+        if (ny < 0 || ny >= height) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = x + dx;
+          if (nx >= 0 && nx < width && partMask[ny * width + nx]) { touchesPart = true; break; }
+        }
+      }
+      if (!touchesPart) shadowCore[index] = 1;
+    }
+  }
+
+  const visited = new Uint8Array(shadowMask.length);
+  const queue = new Int32Array(shadowMask.length);
+  const minArea = Math.max(20, Math.round(targetWidth * targetWidth * 0.035));
+  const nearbyPadding = Math.max(2, Math.round(targetWidth * 0.2));
+  const regions = [];
+
+  for (let start = 0; start < shadowMask.length; start++) {
+    if (!shadowCore[start] || visited[start]) continue;
+    let head = 0;
+    let tail = 0;
+    queue[tail++] = start;
+    visited[start] = 1;
+    let minX = width;
+    let minY = height;
+    let maxX = 0;
+    let maxY = 0;
+    while (head < tail) {
+      const index = queue[head++];
+      const x = index % width;
+      const y = (index / width) | 0;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+      for (let dy = -1; dy <= 1; dy++) {
+        const ny = y + dy;
+        if (ny < 0 || ny >= height) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = x + dx;
+          if (nx < 0 || nx >= width) continue;
+          const neighbor = ny * width + nx;
+          if (shadowCore[neighbor] && !visited[neighbor]) {
+            visited[neighbor] = 1;
+            queue[tail++] = neighbor;
+          }
+        }
+      }
+    }
+
+    if (tail < minArea) continue;
+    const boxWidth = maxX - minX + 1;
+    const boxHeight = maxY - minY + 1;
+    if (Math.max(boxWidth, boxHeight) < targetWidth * 0.28) continue;
+    if (Math.max(boxWidth, boxHeight) > Math.min(width, height) * 0.35) continue;
+    if (boxWidth * boxHeight > width * height * 0.08) continue;
+
+    // Ignore isolated tray texture; a shadow candidate should be close to an
+    // accepted part-like pixel in this threshold result.
+    let nearPart = false;
+    const left = Math.max(0, minX - nearbyPadding);
+    const right = Math.min(width - 1, maxX + nearbyPadding);
+    const top = Math.max(0, minY - nearbyPadding);
+    const bottom = Math.min(height - 1, maxY + nearbyPadding);
+    let partMinX = width;
+    let partMinY = height;
+    let partMaxX = -1;
+    let partMaxY = -1;
+    for (let y = top; y <= bottom; y++) {
+      const row = y * width;
+      for (let x = left; x <= right; x++) {
+        if (!partMask[row + x]) continue;
+        nearPart = true;
+        partMinX = Math.min(partMinX, x);
+        partMinY = Math.min(partMinY, y);
+        partMaxX = Math.max(partMaxX, x);
+        partMaxY = Math.max(partMaxY, y);
+      }
+    }
+    if (!nearPart) continue;
+    const overlapWidth = Math.max(0, Math.min(maxX, partMaxX) - Math.max(minX, partMinX) + 1);
+    const overlapHeight = Math.max(0, Math.min(maxY, partMaxY) - Math.max(minY, partMinY) + 1);
+    const candidateBoxArea = boxWidth * boxHeight;
+    const boxOverlapRatio = (overlapWidth * overlapHeight) / Math.max(1, candidateBoxArea);
+    if (boxOverlapRatio > 0.3) continue;
+    regions.push({ x: minX, y: minY, width: boxWidth, height: boxHeight, area: tail });
+  }
+
+  return regions.sort((a, b) => b.area - a.area).slice(0, 200);
 }
 
 function removeSmallMaskComponents(mask, width, height, minArea) {
@@ -878,7 +973,9 @@ function componentStats(mask, width, height, minArea) {
 
 function createLocalContrast(gray, width, height, targetWidth, sourcePolarity) {
   const integral = grayscaleIntegral(gray, width, height);
-  const radius = Math.max(12, Math.min(180, Math.round(targetWidth * 3.5)));
+  // Tighten the neighborhood slightly so it follows broad cast shadows and
+  // gives them less contrast, while remaining wide enough not to follow threads.
+  const radius = Math.max(12, Math.min(180, Math.round(targetWidth * 3.25)));
   const contrast = new Uint8Array(gray.length);
   const direction = sourcePolarity === 'dark' ? 1 : -1;
   for (let y = 0; y < height; y++) {

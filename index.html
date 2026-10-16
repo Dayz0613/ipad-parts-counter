@@ -10,7 +10,7 @@
   <link rel="manifest" href="./manifest.webmanifest">
   <link rel="apple-touch-icon" sizes="180x180" href="./apple-touch-icon.png">
   <link rel="icon" href="./icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="./styles.css?v=7">
+  <link rel="stylesheet" href="./styles.css?v=8">
   <title>部品カウンター</title>
 </head>
 <body>
@@ -70,6 +70,10 @@
             <button class="preview-button active" id="originalView" type="button" aria-pressed="true">カラー写真</button>
             <button class="preview-button" id="binaryView" type="button" aria-pressed="false" disabled>二値画像</button>
             <button class="preview-button" id="cleanedView" type="button" aria-pressed="false" disabled>膨張収縮後</button>
+          </div>
+          <div class="shadow-preview-toggle">
+            <label class="check-row"><input id="shadowRegionsToggle" type="checkbox" checked disabled><span>影候補を赤枠で表示</span></label>
+            <p class="field-help">境界付近にある、輪郭の弱い影候補を囲みます。実物との判別確認用です。</p>
           </div>
 
           <div class="viewer-footer">
@@ -155,6 +159,6 @@
     </main>
     <footer class="app-footer"><span>部品カウンター MVP</span><span>AIなし · 端末内画像処理</span></footer>
   </div>
-  <script src="./app.js?v=29" defer></script>
+  <script src="./app.js?v=30" defer></script>
 </body>
 </html>

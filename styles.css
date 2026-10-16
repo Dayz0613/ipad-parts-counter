@@ -87,6 +87,10 @@ h1 { margin: 9px 0 7px; font-size: clamp(26px, 3.3vw, 38px); line-height: 1.12; 
 .preview-button { min-height: 31px; padding: 0 11px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); background: #0d1928; font-size: 10px; cursor: pointer; }
 .preview-button[aria-pressed="true"] { border-color: rgba(122,156,255,.35); color: #dbe5ff; background: #263b5d; }
 .preview-button:disabled { opacity: .42; cursor: not-allowed; }
+.shadow-preview-toggle { margin: 5px 1px 0; }
+.shadow-preview-toggle .check-row { margin: 5px 0 0; }
+.shadow-preview-toggle .check-row:has(input:disabled) { opacity: .5; }
+.shadow-preview-toggle .field-help { margin: 2px 0 0 24px; }
 .empty-state { display: flex; align-items: center; flex-direction: column; gap: 8px; max-width: 370px; padding: 32px 20px; text-align: center; }
 .empty-state[hidden] { display: none; }
 .empty-state > strong { margin-top: 5px; font-size: 14px; font-weight: 620; }
