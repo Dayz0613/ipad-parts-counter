@@ -219,7 +219,7 @@ function detect(rgba, width, height, settings) {
     const component = components[label];
     if (!component) continue;
     component.areaEstimatedQuantity = component.autoNoise ? 0 : unitAreaReference
-      ? estimateAreaUnits(component.area, unitAreaReference, 0.35, 0.3)
+      ? estimateAreaUnits(component.area, unitAreaReference, 0.2, 0.3)
       : 1;
     component.estimatedQuantity = component.areaEstimatedQuantity;
     // Area alone can understate a group when silhouettes overlap. Permit
@@ -227,7 +227,7 @@ function detect(rgba, width, height, settings) {
     // the total visible area can still plausibly support the extra item.
     component.maximumSupportedQuantity = component.autoNoise || !unitAreaReference
       ? component.areaEstimatedQuantity
-      : Math.max(component.areaEstimatedQuantity, Math.floor(component.area / (unitAreaReference * 0.6)));
+      : Math.max(component.areaEstimatedQuantity, Math.floor(component.area / (unitAreaReference * 0.8)));
   }
 
   const distance = new Uint16Array(length);
@@ -330,8 +330,17 @@ function detect(rgba, width, height, settings) {
   for (let label = 1; label < components.length; label++) {
     const component = components[label];
     if (!component || component.autoNoise) continue;
-    const peakSupportedQuantity = Math.min(component.maximumSupportedQuantity || 1, component.peaks.length);
-    component.estimatedQuantity = Math.max(component.areaEstimatedQuantity || 1, peakSupportedQuantity);
+    const areaQuantity = component.areaEstimatedQuantity || 1;
+    const maximumSupportedQuantity = component.maximumSupportedQuantity || areaQuantity;
+    const peakSupportedQuantity = Math.min(maximumSupportedQuantity, component.peaks.length);
+    // A connected group can hide one interior maximum where parts touch. If
+    // nearly every area-based item has a distinct peak and the visible area
+    // still supports one more item, allow that single cautious recovery.
+    const recoverOneMissedPeak = areaQuantity > 1
+      && maximumSupportedQuantity > areaQuantity
+      && component.peaks.length >= areaQuantity - 1;
+    const peakGapQuantity = recoverOneMissedPeak ? areaQuantity + 1 : areaQuantity;
+    component.estimatedQuantity = Math.max(areaQuantity, peakSupportedQuantity, peakGapQuantity);
   }
 
   const detections = [];
