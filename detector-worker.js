@@ -217,9 +217,17 @@ function detect(rgba, width, height, settings) {
   const unitAreaReference = reference ? Number(reference.area) : (areaReference.area || firstPartArea);
   for (let label = 1; label < components.length; label++) {
     const component = components[label];
-    if (component) component.estimatedQuantity = component.autoNoise ? 0 : unitAreaReference
+    if (!component) continue;
+    component.areaEstimatedQuantity = component.autoNoise ? 0 : unitAreaReference
       ? estimateAreaUnits(component.area, unitAreaReference, 0.35, 0.3)
       : 1;
+    component.estimatedQuantity = component.areaEstimatedQuantity;
+    // Area alone can understate a group when silhouettes overlap. Permit
+    // strong, separated interior peaks to raise the estimate, but only while
+    // the total visible area can still plausibly support the extra item.
+    component.maximumSupportedQuantity = component.autoNoise || !unitAreaReference
+      ? component.areaEstimatedQuantity
+      : Math.max(component.areaEstimatedQuantity, Math.floor(component.area / (unitAreaReference * 0.6)));
   }
 
   const distance = new Uint16Array(length);
@@ -290,12 +298,14 @@ function detect(rgba, width, height, settings) {
 
   const buckets = new Map();
   const referenceMinorAxis = reference ? Number(reference.minorAxis) : firstPartComponent && firstPartComponent.minorAxis;
-  const minSeparation = Math.max(10, referenceMinorAxis ? referenceMinorAxis * 0.55 : targetWidth * 2.8);
+  const minSeparation = Math.max(10, referenceMinorAxis ? referenceMinorAxis * 0.9 : targetWidth * 0.7);
   const minSeparationSquared = minSeparation * minSeparation;
+  const minPeakRadius = Math.max(2, referenceMinorAxis ? referenceMinorAxis * 0.36 : targetWidth * 0.22);
   for (const candidate of candidates) {
     const component = components[candidate.label];
     if (!component || component.area < minArea || component.autoNoise) continue;
-    const maximumPerComponent = component.estimatedQuantity || 1;
+    const maximumPerComponent = component.maximumSupportedQuantity || 1;
+    if (candidate.distance / 3 < minPeakRadius) continue;
     const cellX = Math.floor(candidate.x / minSeparation);
     const cellY = Math.floor(candidate.y / minSeparation);
     let crowded = false;
@@ -315,6 +325,13 @@ function detect(rgba, width, height, settings) {
     const key = `${candidate.label}:${cellX}:${cellY}`;
     if (!buckets.has(key)) buckets.set(key, []);
     buckets.get(key).push({ x: candidate.x, y: candidate.y });
+  }
+
+  for (let label = 1; label < components.length; label++) {
+    const component = components[label];
+    if (!component || component.autoNoise) continue;
+    const peakSupportedQuantity = Math.min(component.maximumSupportedQuantity || 1, component.peaks.length);
+    component.estimatedQuantity = Math.max(component.areaEstimatedQuantity || 1, peakSupportedQuantity);
   }
 
   const detections = [];
