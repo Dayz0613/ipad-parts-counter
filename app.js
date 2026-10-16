@@ -89,7 +89,7 @@
 
   function registerWorker() {
     try {
-      worker = new Worker('./detector-worker.js?v=27');
+      worker = new Worker('./detector-worker.js?v=28');
       worker.addEventListener('message', (event) => {
         const { jobId, result, error } = event.data || {};
         if (jobId !== activeJob) return;
@@ -128,8 +128,9 @@
           : '';
         const countReferenceLabel = result.referenceUsed
           ? '選択した基準部品'
-          : result.countReferenceMethod === 'shape-consensus' ? '似た形の領域群の中央値' : '最小の有効領域';
-        const firstPartNote = result.countReferenceArea ? ` · ${countReferenceLabel} ${Math.round(result.countReferenceArea).toLocaleString()} px²・形状特徴を1個基準として換算（推定${result.estimatedQuantity}個）` : '';
+          : result.countReferenceMethod.startsWith('shape-consensus') ? '似た形の領域群の中央値'
+          : result.countReferenceMethod === 'area-mode' ? '近い面積候補の中央値' : '単独基準なし';
+        const firstPartNote = result.countReferenceArea ? ` · ${countReferenceLabel} ${Math.round(result.countReferenceArea).toLocaleString()} px²・1個あたり面積の推定に使用（推定${result.estimatedQuantity}個）${result.firstPartLabel === null && !result.referenceUsed ? '・単独の基準部品は未特定' : ''}` : '';
         els.areaCandidateCount.textContent = result.componentCount.toLocaleString();
         const binarization = result.localThreshold ? '局所コントラスト二値化' : result.autoThresholdUsed ? '自動最適化' : '全体二値化';
         const previewNoiseNote = result.binaryPreviewRemovedPixels ? ` · 二値画像の小領域ノイズ ${result.binaryPreviewRemovedPixels.toLocaleString()}画素を除去` : '';
@@ -632,7 +633,7 @@
       els.offlineText.textContent = 'HTTPSで開くとオフライン利用可';
       return;
     }
-    navigator.serviceWorker.register('./service-worker.js?v=27').then(() => navigator.serviceWorker.ready).then(() => {
+    navigator.serviceWorker.register('./service-worker.js?v=28').then(() => navigator.serviceWorker.ready).then(() => {
       els.offlineState.classList.add('ready');
       els.offlineText.textContent = 'オフライン利用の準備OK';
     }).catch(() => {

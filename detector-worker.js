@@ -217,10 +217,11 @@ function detect(rgba, width, height, settings) {
   const areaReference = reference
     ? { area: Number(reference.area), component: null, method: 'selected-shape' }
     : selectAreaReference(countableComponents, targetWidth);
-  const firstPartComponent = areaReference.component || countableComponents.reduce((smallest, component) =>
-    !smallest || component.area < smallest.area ? component : smallest, null);
-  const firstPartArea = firstPartComponent ? firstPartComponent.area : 0;
-  const unitAreaReference = reference ? Number(reference.area) : (areaReference.area || firstPartArea);
+  // Only use an auto-selected component as the one-part shape when the same
+  // shape/area mode contains several plausible examples. A lone smallest blob
+  // may be a fragment or a touching group and must not become the reference.
+  const firstPartComponent = areaReference.component;
+  const unitAreaReference = reference ? Number(reference.area) : areaReference.area;
   for (let label = 1; label < components.length; label++) {
     const component = components[label];
     if (!component) continue;
@@ -447,7 +448,6 @@ function detect(rgba, width, height, settings) {
   }
 
   detections.sort((a, b) => a.area - b.area || a.label - b.label || a.partIndex - b.partIndex);
-  const firstPart = detections.length ? detections[0] : null;
   const previewMinArea = Math.max(minArea, Math.round(targetWidth * targetWidth * 0.04));
   const binaryPreviewMask = removeSmallMaskComponents(thresholdMask, width, height, previewMinArea);
   const binaryPreviewRemovedPixels = thresholdForeground - countForeground(binaryPreviewMask);
@@ -455,8 +455,12 @@ function detect(rgba, width, height, settings) {
   return {
     detections,
     estimatedQuantity: detections.length,
-    firstPartLabel: areaReference.component ? areaReference.component.label : firstPart ? firstPart.label : null,
-    firstPartArea: areaReference.area || (firstPart ? firstPart.area : null),
+    // Do not paint an arbitrary smallest detection as the reference. In
+    // manual-reference mode the reference is a saved shape profile, not an
+    // instance in this image; when auto-selection is ambiguous there is no
+    // trustworthy instance to highlight either.
+    firstPartLabel: areaReference.component ? areaReference.component.label : null,
+    firstPartArea: areaReference.component ? areaReference.component.area : null,
     countReferenceArea: unitAreaReference || null,
     countReferenceMethod: areaReference.method,
     threshold,
@@ -581,18 +585,43 @@ function selectAreaReference(components, targetWidth) {
   const best = ranked[0];
   const minimumClusterSize = Math.max(5, Math.ceil(pool.length * 0.4));
   if (best.neighbors.length >= minimumClusterSize) {
+    // Find a repeated area band within the shape-consensus group. A connected
+    // pair generally has substantially more foreground than a single part;
+    // using the raw median can select such a pair when several are present.
+    // The broad band tolerates partial silhouettes and illumination changes.
+    const areaBand = findRepeatedAreaBand(best.neighbors);
+    const minimumAreaBandSize = Math.max(2, Math.ceil(best.neighbors.length * 0.25));
+    if (areaBand.members.length >= minimumAreaBandSize) {
+      const component = areaBand.members.reduce((nearest, item) =>
+        Math.abs(item.area - areaBand.area) < Math.abs(nearest.area - areaBand.area) ? item : nearest
+      );
+      return { area: areaBand.area, component, method: 'shape-consensus' };
+    }
+    // Keep the robust area estimate for counting, but leave the image without
+    // a pink "one part" marker when no repeated single-part-sized band exists.
     const areas = best.neighbors.map((component) => component.area).sort((a, b) => a - b);
     const middle = Math.floor(areas.length / 2);
     const area = areas.length % 2 ? areas[middle] : (areas[middle - 1] + areas[middle]) / 2;
-    const component = best.neighbors.reduce((nearest, item) =>
-      Math.abs(item.area - area) < Math.abs(nearest.area - area) ? item : nearest
-    );
-    return { area, component, method: 'shape-consensus' };
+    return { area, component: null, method: 'shape-consensus-ambiguous' };
   }
-  const smallest = pool.reduce((bestComponent, component) =>
-    component.area < bestComponent.area ? component : bestComponent
-  );
-  return { area: smallest.area, component: smallest, method: 'smallest-plausible' };
+  const areaBand = findRepeatedAreaBand(pool);
+  if (areaBand.members.length >= 2) {
+    return { area: areaBand.area, component: null, method: 'area-mode' };
+  }
+  return { area: 0, component: null, method: 'no-singleton-consensus' };
+}
+
+function findRepeatedAreaBand(components) {
+  const areaBands = components.map((center) => {
+    const members = components.filter((item) =>
+      Math.abs(Math.log(Math.max(1, item.area) / Math.max(1, center.area))) <= Math.log(1.28)
+    );
+    const sorted = members.map((item) => item.area).sort((a, b) => a - b);
+    const middle = Math.floor(sorted.length / 2);
+    const area = sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+    return { members, area };
+  }).sort((a, b) => b.members.length - a.members.length || a.area - b.area);
+  return areaBands[0] || { members: [], area: 0 };
 }
 
 // Morphological closing (dilation followed by erosion) seals narrow gaps in a
