@@ -67,6 +67,13 @@ function detect(rgba, width, height, settings) {
   const integral = reference ? grayscaleIntegral(gray, width, height) : null;
   if (reference && !automatic) threshold = Math.max(0, Math.min(255, Math.round((reference.meanObject + reference.meanBackground) / 2 + offset)));
 
+  // A soft cast shadow can be darker than the tray without belonging to the
+  // part. Estimate the image's edge-strength cutoff from pixels already above
+  // the contrast threshold, then keep either crisp edges or very strong
+  // contrast. The latter preserves flat, dark interiors of non-metal parts.
+  const shadowEdge = useAdaptiveThreshold
+    ? estimateShadowEdgeThreshold(gray, thresholdGray, threshold, width, height)
+    : null;
   const thresholdMask = new Uint8Array(length);
   let thresholdForeground = 0;
   const darkParts = polarity === 'dark';
@@ -80,7 +87,12 @@ function detect(rgba, width, height, settings) {
     }
     const value = useAdaptiveThreshold ? thresholdGray[i] : gray[i];
     const on = darkParts ? value <= pixelThreshold : value > pixelThreshold;
-    if (on) { thresholdMask[i] = 1; thresholdForeground++; }
+    const clearPartContrast = shadowEdge && value >= pixelThreshold + Math.max(12, shadowEdge.threshold);
+    const hasPartLikeEdge = shadowEdge && shadowEdge.strength[i] >= shadowEdge.threshold;
+    if (on && (!shadowEdge || clearPartContrast || hasPartLikeEdge)) {
+      thresholdMask[i] = 1;
+      thresholdForeground++;
+    }
   }
 
   // Automatically infer the closing radius from the estimated part width.
@@ -479,6 +491,7 @@ function detect(rgba, width, height, settings) {
     candidateLimitReached,
     width,
     height,
+    shadowEdgeThreshold: shadowEdge ? shadowEdge.threshold : null,
     binaryMask: binaryPreviewMask,
     areaFilteredMask,
     closingRadius: closing.radius,
@@ -488,6 +501,45 @@ function detect(rgba, width, height, settings) {
     referenceUsed: reference ? { area: reference.area } : null,
     localThreshold: useAdaptiveThreshold
   };
+}
+
+function estimateShadowEdgeThreshold(gray, contrast, threshold, width, height) {
+  const strength = new Uint8Array(gray.length);
+  const histogram = new Uint32Array(256);
+  let candidateCount = 0;
+  for (let y = 1; y < height - 1; y++) {
+    const row = y * width;
+    for (let x = 1; x < width - 1; x++) {
+      const index = row + x;
+      if (contrast[index] <= threshold) continue;
+      const left = index - 1;
+      const right = index + 1;
+      const above = index - width;
+      const below = index + width;
+      const gx = (gray[above + 1] + 2 * gray[right] + gray[below + 1]
+        - gray[above - 1] - 2 * gray[left] - gray[below - 1]) / 8;
+      const gy = (gray[below - 1] + 2 * gray[below] + gray[below + 1]
+        - gray[above - 1] - 2 * gray[above] - gray[above + 1]) / 8;
+      const edge = Math.min(255, Math.round(Math.hypot(gx, gy)));
+      strength[index] = edge;
+      histogram[edge]++;
+      candidateCount++;
+    }
+  }
+
+  let thresholdEdge = 8;
+  if (candidateCount >= 64) {
+    const target = Math.ceil(candidateCount * 0.8);
+    let cumulative = 0;
+    for (let edge = 0; edge < histogram.length; edge++) {
+      cumulative += histogram[edge];
+      if (cumulative >= target) {
+        thresholdEdge = Math.max(8, Math.min(40, edge));
+        break;
+      }
+    }
+  }
+  return { strength, threshold: thresholdEdge };
 }
 
 function removeSmallMaskComponents(mask, width, height, minArea) {
