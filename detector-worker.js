@@ -89,20 +89,37 @@ function detect(rgba, width, height, settings) {
     }
     const value = useAdaptiveThreshold ? thresholdGray[i] : gray[i];
     const on = darkParts ? value <= pixelThreshold : value > pixelThreshold;
-    const clearPartContrast = shadowEdge && value >= pixelThreshold + Math.max(12, shadowEdge.threshold);
+    const clearPartContrast = shadowEdge && (darkParts
+      ? value <= pixelThreshold - Math.max(12, shadowEdge.threshold)
+      : value >= pixelThreshold + Math.max(12, shadowEdge.threshold));
     const hasPartLikeEdge = shadowEdge && shadowEdge.strength[i] >= shadowEdge.threshold;
     if (on && (!shadowEdge || clearPartContrast || hasPartLikeEdge)) {
       thresholdMask[i] = 1;
       thresholdForeground++;
     } else if (shadowCandidateMask) {
-      const weakEdge = shadowEdge.strength[i] < shadowEdge.threshold * 0.55;
-      if (value < pixelThreshold && value >= pixelThreshold - shadowContrastBand && weakEdge) shadowCandidateMask[i] = 1;
+      if (value < pixelThreshold && value >= pixelThreshold - shadowContrastBand) {
+        // Require the surrounding patch to stay smooth as well. Metal shafts
+        // have quiet pixels between threads, but their 3x3 neighborhood has
+        // much stronger texture than a diffuse cast shadow.
+        const x = i % width;
+        const y = (i / width) | 0;
+        let edgeSum = 0;
+        let edgeSamples = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          const ny = y + dy;
+          if (ny < 0 || ny >= height) continue;
+          for (let dx = -1; dx <= 1; dx++) {
+            const nx = x + dx;
+            if (nx < 0 || nx >= width) continue;
+            edgeSum += shadowEdge.strength[ny * width + nx];
+            edgeSamples++;
+          }
+        }
+        const weakNeighborhood = edgeSum / Math.max(1, edgeSamples) < shadowEdge.threshold * 0.42;
+        if (weakNeighborhood) shadowCandidateMask[i] = 1;
+      }
     }
   }
-  const shadowRegions = shadowCandidateMask
-    ? findShadowRegions(shadowCandidateMask, thresholdMask, width, height, targetWidth)
-    : [];
-
   // Automatically infer the closing radius from the estimated part width.
   const minArea = Math.max(1, Number(settings.minArea) || 12);
   const closing = selectClosing(thresholdMask, width, height, targetWidth, minArea);
@@ -256,6 +273,12 @@ function detect(rgba, width, height, settings) {
       ? component.areaEstimatedQuantity
       : Math.max(component.areaEstimatedQuantity, Math.floor(component.area / (unitAreaReference * 0.8)));
   }
+
+  // Show only shadow patches that sit between or around a group of at least
+  // two parts. Single-part halos are too easy to confuse with the part itself.
+  const shadowRegions = shadowCandidateMask
+    ? findShadowRegions(shadowCandidateMask, areaFilteredMask, width, height, targetWidth, components, shadowEdge.strength, shadowEdge.threshold)
+    : [];
 
   const distance = new Uint16Array(length);
   const infinity = 30000;
@@ -537,34 +560,33 @@ function estimateShadowEdgeThreshold(gray, contrast, threshold, width, height) {
   return { strength, threshold: thresholdEdge };
 }
 
-function findShadowRegions(shadowMask, partMask, width, height, targetWidth) {
+function findShadowRegions(shadowMask, partMask, width, height, targetWidth, partComponents, edgeStrength, edgeThreshold) {
+  // A true cast shadow is close to a part but should not hug its silhouette.
+  // Restrict candidates to a distance band around the detected parts: pixels
+  // inside the inner band are usually dark metal texture or edge fragments,
+  // while pixels outside the outer band are more likely tray illumination.
+  const innerRadius = Math.max(2, Math.round(targetWidth * 0.12));
+  const outerRadius = Math.max(innerRadius + 1, Math.round(targetWidth * 0.9));
+  const nearParts = dilateMask(partMask, width, height, outerRadius);
+  const touchingParts = dilateMask(partMask, width, height, innerRadius);
   const shadowCore = new Uint8Array(shadowMask.length);
-  for (let y = 0; y < height; y++) {
-    const row = y * width;
-    for (let x = 0; x < width; x++) {
-      const index = row + x;
-      if (!shadowMask[index]) continue;
-      let touchesPart = false;
-      for (let dy = -1; dy <= 1 && !touchesPart; dy++) {
-        const ny = y + dy;
-        if (ny < 0 || ny >= height) continue;
-        for (let dx = -1; dx <= 1; dx++) {
-          const nx = x + dx;
-          if (nx >= 0 && nx < width && partMask[ny * width + nx]) { touchesPart = true; break; }
-        }
-      }
-      if (!touchesPart) shadowCore[index] = 1;
-    }
+  for (let i = 0; i < shadowMask.length; i++) {
+    if (shadowMask[i] && nearParts[i] && !touchingParts[i]) shadowCore[i] = 1;
   }
+  // Join nearby fragments of one soft shadow before measuring it. The small
+  // closing radius repairs speckled edges without allowing distant shadows to
+  // fuse into one oversized rectangle.
+  const groupedShadowCore = closeMask(shadowCore, width, height, Math.max(1, Math.round(targetWidth * 0.06)));
 
   const visited = new Uint8Array(shadowMask.length);
   const queue = new Int32Array(shadowMask.length);
-  const minArea = Math.max(20, Math.round(targetWidth * targetWidth * 0.035));
+  const minArea = Math.max(36, Math.round(targetWidth * targetWidth * 0.075));
   const nearbyPadding = Math.max(2, Math.round(targetWidth * 0.2));
+  const maxBoxSide = Math.max(targetWidth * 2, Math.min(width, height) * 0.04);
   const regions = [];
 
   for (let start = 0; start < shadowMask.length; start++) {
-    if (!shadowCore[start] || visited[start]) continue;
+    if (!groupedShadowCore[start] || visited[start]) continue;
     let head = 0;
     let tail = 0;
     queue[tail++] = start;
@@ -588,7 +610,7 @@ function findShadowRegions(shadowMask, partMask, width, height, targetWidth) {
           const nx = x + dx;
           if (nx < 0 || nx >= width) continue;
           const neighbor = ny * width + nx;
-          if (shadowCore[neighbor] && !visited[neighbor]) {
+          if (groupedShadowCore[neighbor] && !visited[neighbor]) {
             visited[neighbor] = 1;
             queue[tail++] = neighbor;
           }
@@ -599,9 +621,14 @@ function findShadowRegions(shadowMask, partMask, width, height, targetWidth) {
     if (tail < minArea) continue;
     const boxWidth = maxX - minX + 1;
     const boxHeight = maxY - minY + 1;
-    if (Math.max(boxWidth, boxHeight) < targetWidth * 0.28) continue;
-    if (Math.max(boxWidth, boxHeight) > Math.min(width, height) * 0.35) continue;
-    if (boxWidth * boxHeight > width * height * 0.08) continue;
+    const longSide = Math.max(boxWidth, boxHeight);
+    const shortSide = Math.min(boxWidth, boxHeight);
+    if (longSide < targetWidth * 0.25 || shortSide < targetWidth * 0.36) continue;
+    // A single shadow should stay near one object. A long, sparse connected
+    // component is commonly several shadows joined by threshold noise.
+    if (longSide > maxBoxSide || boxWidth * boxHeight > width * height * 0.012) continue;
+    const boxFillRatio = tail / Math.max(1, boxWidth * boxHeight);
+    if (boxFillRatio < 0.16 || longSide / Math.max(1, shortSide) > 3.5) continue;
 
     // Ignore isolated tray texture; a shadow candidate should be close to an
     // accepted part-like pixel in this threshold result.
@@ -631,10 +658,114 @@ function findShadowRegions(shadowMask, partMask, width, height, targetWidth) {
     const candidateBoxArea = boxWidth * boxHeight;
     const boxOverlapRatio = (overlapWidth * overlapHeight) / Math.max(1, candidateBoxArea);
     if (boxOverlapRatio > 0.3) continue;
-    regions.push({ x: minX, y: minY, width: boxWidth, height: boxHeight, area: tail });
+    let overlapsDetectedPart = false;
+    for (let label = 1; label < partComponents.length; label++) {
+      const component = partComponents[label];
+      if (!component || component.autoNoise) continue;
+      const componentOverlapWidth = Math.max(0, Math.min(maxX, component.maxX) - Math.max(minX, component.minX) + 1);
+      if (!componentOverlapWidth) continue;
+      const componentOverlapHeight = Math.max(0, Math.min(maxY, component.maxY) - Math.max(minY, component.minY) + 1);
+      const overlap = componentOverlapWidth * componentOverlapHeight / Math.max(1, candidateBoxArea);
+      if (overlap > 0.16) { overlapsDetectedPart = true; break; }
+    }
+    if (overlapsDetectedPart) continue;
+    const groupPadding = Math.max(nearbyPadding, Math.round(targetWidth * 0.55));
+    let nearbyObjectCount = 0;
+    for (let label = 1; label < partComponents.length; label++) {
+      const component = partComponents[label];
+      if (!component || component.autoNoise || !component.estimatedQuantity) continue;
+      const gapX = Math.max(0, Math.max(component.minX - maxX, minX - component.maxX));
+      const gapY = Math.max(0, Math.max(component.minY - maxY, minY - component.maxY));
+      if (gapX <= groupPadding && gapY <= groupPadding) {
+        nearbyObjectCount += Math.max(1, component.estimatedQuantity);
+        if (nearbyObjectCount >= 2) break;
+      }
+    }
+    if (nearbyObjectCount < 2) continue;
+    const candidateLong = Math.max(boxWidth, boxHeight);
+    const candidateShort = Math.min(boxWidth, boxHeight);
+    const candidateAspect = candidateLong / Math.max(1, candidateShort);
+    const shapePadding = Math.max(groupPadding, Math.round(targetWidth * 1.1));
+    let resemblesPartShape = false;
+    for (let label = 1; label < partComponents.length; label++) {
+      const component = partComponents[label];
+      if (!component || component.autoNoise || !component.estimatedQuantity) continue;
+      const gapX = Math.max(0, Math.max(component.minX - maxX, minX - component.maxX));
+      const gapY = Math.max(0, Math.max(component.minY - maxY, minY - component.maxY));
+      if (gapX > shapePadding || gapY > shapePadding) continue;
+      const componentLong = component.majorAxis || Math.max(component.width, component.height);
+      const componentShort = component.minorAxis || Math.min(component.width, component.height);
+      const componentAspect = component.aspect || componentLong / Math.max(1, componentShort);
+      const longRatio = candidateLong / Math.max(1, componentLong);
+      const shortRatio = candidateShort / Math.max(1, componentShort);
+      if (longRatio >= 0.62 && longRatio <= 1.55
+        && shortRatio >= 0.55 && shortRatio <= 1.65
+        && Math.abs(candidateAspect - componentAspect) <= Math.max(0.55, componentAspect * 0.45)) {
+        resemblesPartShape = true;
+        break;
+      }
+    }
+    if (resemblesPartShape) continue;
+    // A diffuse shadow has a weak boundary. If the surrounding context is
+    // full of strong ridges, this is more likely an unsegmented part surface.
+    const contextPadding = Math.max(2, Math.round(targetWidth * 0.18));
+    const contextLeft = Math.max(0, minX - contextPadding);
+    const contextRight = Math.min(width - 1, maxX + contextPadding);
+    const contextTop = Math.max(0, minY - contextPadding);
+    const contextBottom = Math.min(height - 1, maxY + contextPadding);
+    let strongEdges = 0;
+    let contextPixels = 0;
+    for (let y = contextTop; y <= contextBottom; y++) {
+      for (let x = contextLeft; x <= contextRight; x++) {
+        contextPixels++;
+        if (edgeStrength[y * width + x] >= edgeThreshold) strongEdges++;
+      }
+    }
+    if (strongEdges / Math.max(1, contextPixels) > 0.08) continue;
+    // Give a tight candidate a little context so the red outline marks the
+    // shadow patch, rather than tracing just a narrow strip of pixels.
+    const padding = Math.max(2, Math.round(targetWidth * 0.12));
+    const x = Math.max(0, minX - padding);
+    const y = Math.max(0, minY - padding);
+    const rightEdge = Math.min(width, maxX + padding + 1);
+    const bottomEdge = Math.min(height, maxY + padding + 1);
+    regions.push({ x, y, width: rightEdge - x, height: bottomEdge - y, area: tail });
   }
 
   return regions.sort((a, b) => b.area - a.area).slice(0, 200);
+}
+
+function dilateMask(source, width, height, radius) {
+  if (radius <= 0) return source;
+  const length = width * height;
+  const horizontal = new Uint8Array(length);
+  const expanded = new Uint8Array(length);
+  // A square dilation can be split into horizontal and vertical sliding
+  // windows, keeping this linear in image size even for larger objects.
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    let sum = 0;
+    for (let x = 0; x <= Math.min(radius, width - 1); x++) sum += source[row + x];
+    for (let x = 0; x < width; x++) {
+      horizontal[row + x] = sum > 0 ? 1 : 0;
+      const removeX = x - radius;
+      const addX = x + radius + 1;
+      if (removeX >= 0) sum -= source[row + removeX];
+      if (addX < width) sum += source[row + addX];
+    }
+  }
+  for (let x = 0; x < width; x++) {
+    let sum = 0;
+    for (let y = 0; y <= Math.min(radius, height - 1); y++) sum += horizontal[y * width + x];
+    for (let y = 0; y < height; y++) {
+      expanded[y * width + x] = sum > 0 ? 1 : 0;
+      const removeY = y - radius;
+      const addY = y + radius + 1;
+      if (removeY >= 0) sum -= horizontal[removeY * width + x];
+      if (addY < height) sum += horizontal[addY * width + x];
+    }
+  }
+  return expanded;
 }
 
 function removeSmallMaskComponents(mask, width, height, minArea) {

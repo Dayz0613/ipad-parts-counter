@@ -91,7 +91,7 @@
 
   function registerWorker() {
     try {
-      worker = new Worker('./detector-worker.js?v=30');
+      worker = new Worker('./detector-worker.js?v=31');
       worker.addEventListener('message', (event) => {
         const { jobId, result, error } = event.data || {};
         if (jobId !== activeJob) return;
@@ -140,8 +140,8 @@
           ? ''
           : ` · 影除外の輪郭基準 ${result.shadowEdgeThreshold}`;
         const shadowRegionsNote = result.shadowRegions && result.shadowRegions.length
-          ? ` · 影候補 ${result.shadowRegions.length}箇所を赤枠表示（要確認）`
-          : ' · 影候補の赤枠なし';
+          ? ` · 複数部品の間にある影候補 ${result.shadowRegions.length}箇所を赤枠表示（要確認）`
+          : ' · 複数部品の影候補なし（赤枠なし）';
         const previewNoiseNote = result.binaryPreviewRemovedPixels ? ` · 二値画像の小領域ノイズ ${result.binaryPreviewRemovedPixels.toLocaleString()}画素を除去` : '';
         const closingNote = result.closingRadius ? ` · 自動膨張収縮 半径${result.closingRadius}px（領域数の安定から選択）・塗り足し${result.closingFilledPixels.toLocaleString()}画素` : ' · 自動膨張収縮 なし（合体・膨張を避けました）';
         const smallNoiseNote = result.autoNoiseComponentCount ? ` · 小さなノイズ候補を自動除外 ${result.autoNoiseComponentCount}領域` : '';
@@ -656,7 +656,7 @@
       els.offlineText.textContent = 'HTTPSで開くとオフライン利用可';
       return;
     }
-    navigator.serviceWorker.register('./service-worker.js?v=30').then(() => navigator.serviceWorker.ready).then(() => {
+    navigator.serviceWorker.register('./service-worker.js?v=31').then(() => navigator.serviceWorker.ready).then(() => {
       els.offlineState.classList.add('ready');
       els.offlineText.textContent = 'オフライン利用の準備OK';
     }).catch(() => {
