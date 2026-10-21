@@ -1180,7 +1180,7 @@ function suppressSpecularReflections(gray, width, height, targetWidth, backgroun
 }
 
 function closeNarrowReflectionGaps(contrast, width, height, targetWidth) {
-  const radius = Math.max(1, Math.min(2, Math.round(targetWidth * 0.04)));
+  const radius = Math.max(2, Math.min(4, Math.round(targetWidth * 0.10)));
   const dilated = grayscaleMorphology(contrast, width, height, radius, true);
   const closed = grayscaleMorphology(dilated, width, height, radius, false);
   const corrected = contrast.slice();
@@ -1191,7 +1191,7 @@ function closeNarrowReflectionGaps(contrast, width, height, targetWidth) {
   // regions are not pulled together.
   for (let i = 0; i < contrast.length; i++) {
     if (contrast[i] < 96 || closed[i] <= contrast[i]) continue;
-    const value = Math.min(closed[i], contrast[i] + 36);
+    const value = Math.min(closed[i], contrast[i] + 56);
     if (value > contrast[i]) {
       corrected[i] = value;
       correctedPixels++;
