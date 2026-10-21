@@ -53,6 +53,11 @@ function detect(rgba, width, height, settings) {
     // this floor applies only to the local contrast normalization scale.
     const contrastWindowWidth = Math.max(targetWidth, Math.min(width, height) * 0.02);
     thresholdGray = createLocalContrast(reflectionCorrected.gray, width, height, contrastWindowWidth, expectedPartPolarity);
+    if (expectedPartPolarity === 'dark') {
+      const gapCorrection = closeNarrowReflectionGaps(thresholdGray, width, height, targetWidth);
+      thresholdGray = gapCorrection.gray;
+      reflectionCorrectedPixels += gapCorrection.correctedPixels;
+    }
     const contrastHistogram = new Uint32Array(256);
     for (let i = 0; i < length; i++) contrastHistogram[thresholdGray[i]]++;
     const contrastBase = otsuThreshold(contrastHistogram, length);
@@ -1172,6 +1177,61 @@ function suppressSpecularReflections(gray, width, height, targetWidth, backgroun
     }
   }
   return { gray: corrected, correctedPixels };
+}
+
+function closeNarrowReflectionGaps(contrast, width, height, targetWidth) {
+  const radius = Math.max(1, Math.min(2, Math.round(targetWidth * 0.04)));
+  const dilated = grayscaleMorphology(contrast, width, height, radius, true);
+  const closed = grayscaleMorphology(dilated, width, height, radius, false);
+  const corrected = contrast.slice();
+  let correctedPixels = 0;
+
+  // Local contrast is high inside a dark part and near 128 on the tray. Close
+  // only shallow valleys near that baseline so nearby parts and deep tray
+  // regions are not pulled together.
+  for (let i = 0; i < contrast.length; i++) {
+    if (contrast[i] < 96 || closed[i] <= contrast[i]) continue;
+    const value = Math.min(closed[i], contrast[i] + 36);
+    if (value > contrast[i]) {
+      corrected[i] = value;
+      correctedPixels++;
+    }
+  }
+  return { gray: corrected, correctedPixels };
+}
+
+function grayscaleMorphology(source, width, height, radius, maximum) {
+  const horizontal = new Uint8Array(source.length);
+  const output = new Uint8Array(source.length);
+  const initial = maximum ? 0 : 255;
+
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    for (let x = 0; x < width; x++) {
+      let value = initial;
+      for (let dx = -radius; dx <= radius; dx++) {
+        const nx = x + dx;
+        if (nx < 0 || nx >= width) continue;
+        const sample = source[row + nx];
+        value = maximum ? Math.max(value, sample) : Math.min(value, sample);
+      }
+      horizontal[row + x] = value;
+    }
+  }
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let value = initial;
+      for (let dy = -radius; dy <= radius; dy++) {
+        const ny = y + dy;
+        if (ny < 0 || ny >= height) continue;
+        const sample = horizontal[ny * width + x];
+        value = maximum ? Math.max(value, sample) : Math.min(value, sample);
+      }
+      output[y * width + x] = value;
+    }
+  }
+  return output;
 }
 
 // Search thresholds on a small image, then refine the best band at full
