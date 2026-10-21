@@ -31,22 +31,28 @@ function detect(rgba, width, height, settings) {
   let polarity = reference ? reference.polarity : settings.polarity;
   let partPolarity = polarity;
   let thresholdGray = gray;
+  let reflectionCorrectedPixels = 0;
   const useAdaptiveThreshold = automatic;
   if (useAdaptiveThreshold) {
     // Normalize gradual lighting and tray texture before selecting a threshold.
     // A large local window estimates the nearby background; foreground is the
     // signed contrast from that background, so the optimizer sees object edges
     // instead of broad shadows or brightness gradients.
-    const backgroundLevel = reference ? null : borderMedian(gray, width, height);
+    const backgroundLevel = borderMedian(gray, width, height);
     const expectedPartPolarity = reference ? reference.polarity : (backgroundLevel > baseThreshold ? 'dark' : 'bright');
     partPolarity = expectedPartPolarity;
+    // Suppress bright specular patches only when nearby pixels establish that
+    // the patch lies inside a dark part. This avoids darkening the tray or the
+    // soft cast shadow around an object.
+    const reflectionCorrected = suppressSpecularReflections(gray, width, height, targetWidth, backgroundLevel, expectedPartPolarity);
+    reflectionCorrectedPixels = reflectionCorrected.correctedPixels;
     // Keep the illumination/background estimate wide enough even when the
     // user enters a very small part width. A window tied only to that value
     // follows screw threads and reflective edges, fragmenting the silhouette.
     // The part-width setting still controls geometric filtering and counting;
     // this floor applies only to the local contrast normalization scale.
     const contrastWindowWidth = Math.max(targetWidth, Math.min(width, height) * 0.02);
-    thresholdGray = createLocalContrast(gray, width, height, contrastWindowWidth, expectedPartPolarity);
+    thresholdGray = createLocalContrast(reflectionCorrected.gray, width, height, contrastWindowWidth, expectedPartPolarity);
     const contrastHistogram = new Uint32Array(256);
     for (let i = 0; i < length; i++) contrastHistogram[thresholdGray[i]]++;
     const contrastBase = otsuThreshold(contrastHistogram, length);
@@ -509,6 +515,7 @@ function detect(rgba, width, height, settings) {
     width,
     height,
     shadowEdgeThreshold: shadowEdge ? shadowEdge.threshold : null,
+    reflectionCorrectedPixels,
     shadowRegions,
     binaryMask: binaryPreviewMask,
     areaFilteredMask,
@@ -1118,6 +1125,53 @@ function createLocalContrast(gray, width, height, targetWidth, sourcePolarity) {
     }
   }
   return contrast;
+}
+
+function suppressSpecularReflections(gray, width, height, targetWidth, backgroundLevel, polarity) {
+  if (polarity !== 'dark' || width < 3 || height < 3) return { gray, correctedPixels: 0 };
+  const corrected = new Uint8Array(gray);
+  const radius = Math.max(1, Math.min(4, Math.round(targetWidth * 0.08)));
+  const integral = grayscaleIntegral(gray, width, height);
+  const objectCutoff = backgroundLevel - 14;
+  let correctedPixels = 0;
+
+  for (let y = 1; y < height - 1; y++) {
+    const row = y * width;
+    for (let x = 1; x < width - 1; x++) {
+      const index = row + x;
+      const value = gray[index];
+      const localMean = localMeanAt(integral, width, height, x, y, radius);
+      const highlightStrength = value - localMean;
+      if (localMean >= objectCutoff || value < backgroundLevel - 30 || highlightStrength < 24) continue;
+
+      // Require a dark, textured neighborhood on several sides. Diffuse
+      // shadows are smooth and do not meet this test; a reflection inside a
+      // metal part usually does because its threads and edges remain visible.
+      let partNeighbors = 0;
+      let localMin = 255;
+      let localMax = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue;
+          const neighbor = gray[(y + dy) * width + x + dx];
+          if (neighbor < objectCutoff) partNeighbors++;
+          if (neighbor < localMin) localMin = neighbor;
+          if (neighbor > localMax) localMax = neighbor;
+        }
+      }
+      if (partNeighbors < 3 || localMax - localMin < 12) continue;
+
+      // Pull only the bright outlier toward its local part surface. Leaving a
+      // small margin preserves real contours while keeping glare from opening
+      // holes in the later binary mask.
+      const replacement = Math.min(value, Math.round(localMean + Math.min(18, highlightStrength * 0.32)));
+      if (replacement < value) {
+        corrected[index] = replacement;
+        correctedPixels++;
+      }
+    }
+  }
+  return { gray: corrected, correctedPixels };
 }
 
 // Search thresholds on a small image, then refine the best band at full
