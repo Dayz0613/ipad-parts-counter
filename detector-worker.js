@@ -296,10 +296,13 @@ function detect(rgba, width, height, settings) {
     const peakAreaLimit = unitAreaReference
       ? Math.floor(component.area / (unitAreaReference * 0.75))
       : component.areaEstimatedQuantity;
-    const allowPeakRecovery = areaQuantity >= 4 && areaPerEstimatedPart > 1.03;
+    const allowPeakRecovery = areaQuantity >= 4 && areaPerEstimatedPart > 0.9;
     component.maximumSupportedQuantity = component.autoNoise
       ? 0
-      : allowPeakRecovery ? Math.max(areaQuantity, peakAreaLimit) : areaQuantity;
+      // A dense group can lose part area where screws overlap. Let strong,
+      // spatially separated interior peaks recover one missed item, while
+      // keeping the area estimate as a tight cap to avoid runaway overcounts.
+      : allowPeakRecovery ? Math.min(areaQuantity + 1, Math.max(areaQuantity, peakAreaLimit)) : areaQuantity;
   }
 
   // Show only shadow patches that sit between or around a group of at least
@@ -387,7 +390,7 @@ function detect(rgba, width, height, settings) {
   const minPeakRadius = Math.max(1.25, referenceMinorAxis ? referenceMinorAxis * 0.2 : targetWidth * 0.14);
   const minimumSeedSpacing = Math.max(
     minSeparation,
-    (referenceMajorAxis || targetWidth * 2.8) * 0.8
+    (referenceMajorAxis || targetWidth * 2.8) * 0.65
   );
   const candidatesByLabel = new Map();
   const broadHubsByLabel = new Map();
