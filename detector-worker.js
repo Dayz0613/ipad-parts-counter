@@ -931,11 +931,10 @@ function findRepeatedAreaBand(components) {
 function selectClosing(source, width, height, targetWidth, minArea) {
   const baseline = removeIsolatedPixels(source, width, height);
   const baselineStats = componentStats(baseline, width, height, minArea);
-  // Search a scale-relative range, then stop as soon as component counts
-  // stabilize. The plateau's first radius is the smallest useful closing
-  // strength; on the screw reference photo, counts go 7 -> 6 -> 6, so this
-  // selects 2px rather than hard-coding it.
-  const maxRadius = Math.max(3, Math.min(12, Math.ceil(Math.max(3, targetWidth) * 0.75)));
+  // Reflection-gap correction already reconnects shallow breaks before
+  // thresholding. Keep binary closing small so its dilation does not merge
+  // neighboring parts; use at most a 2px radius for the remaining tiny gaps.
+  const maxRadius = Math.max(1, Math.min(2, Math.ceil(Math.max(3, targetWidth) * 0.06)));
   let best = { mask: baseline, radius: 0, filledPixels: 0, method: 'none' };
   let previous = { ...best, foreground: baselineStats.foreground, components: baselineStats.components };
   for (let radius = 1; radius <= maxRadius; radius++) {
@@ -943,8 +942,9 @@ function selectClosing(source, width, height, targetWidth, minArea) {
     const stats = componentStats(candidate, width, height, minArea);
     const added = stats.foreground - baselineStats.foreground;
     const growth = added / Math.max(1, baselineStats.foreground);
-    // Reject a radius that starts swallowing too much of the surrounding area.
-    if (growth > 1) break;
+    // Reject a radius that substantially inflates the foreground. This is a
+    // tighter guard now that the threshold mask already includes glare repair.
+    if (growth > 0.35) break;
     const current = { mask: candidate, radius, filledPixels: Math.max(0, added), foreground: stats.foreground, components: stats.components };
     if (added > 0) best = { ...current, method: 'component-count-stability' };
     if (radius > 1 && current.components === previous.components && previous.radius > 0 && previous.filledPixels > 0) {
