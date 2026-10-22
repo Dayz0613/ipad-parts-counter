@@ -284,7 +284,7 @@ function detect(rgba, width, height, settings) {
     const component = components[label];
     if (!component) continue;
     component.areaEstimatedQuantity = component.autoNoise ? 0 : unitAreaReference
-      ? estimateAreaUnits(component.area, unitAreaReference, 0.3, 0.4)
+      ? estimateAreaUnits(component.area, unitAreaReference, 0.18, 0.3)
       : 1;
     component.estimatedQuantity = component.areaEstimatedQuantity;
     // Area alone can understate a group when silhouettes overlap. Permit
@@ -292,7 +292,7 @@ function detect(rgba, width, height, settings) {
     // the total visible area can still plausibly support the extra item.
     component.maximumSupportedQuantity = component.autoNoise || !unitAreaReference
       ? component.areaEstimatedQuantity
-      : Math.max(component.areaEstimatedQuantity, Math.floor(component.area / (unitAreaReference * 0.7)));
+      : Math.max(component.areaEstimatedQuantity, Math.floor(component.area / (unitAreaReference * 0.82)));
   }
 
   // Show only shadow patches that sit between or around a group of at least
@@ -835,17 +835,17 @@ function estimateAreaUnits(area, unitArea, lowerTolerance, upperTolerance) {
   for (let count = 1; count <= maxUnits; count++) {
     const perUnitRatio = ratio / count;
     if (perUnitRatio < 1 - lowerTolerance || perUnitRatio > 1 + upperTolerance) continue;
-    // Occlusion tends to remove visible foreground, so when two adjacent
-    // counts both fit the tolerance band, mildly prefer the higher count.
-    const relativeError = perUnitRatio < 1
-      ? (1 - perUnitRatio) * 0.8
-      : perUnitRatio - 1;
-    if (relativeError < bestRelativeError - 1e-9 || (Math.abs(relativeError - bestRelativeError) <= 1e-9 && count > bestCount)) {
+    // Resolve equally plausible counts conservatively. Threshold repair can
+    // enlarge silhouettes, so an ambiguous area should not favor extra parts.
+    const relativeError = Math.abs(perUnitRatio - 1);
+    if (relativeError < bestRelativeError - 1e-9 || (Math.abs(relativeError - bestRelativeError) <= 1e-9 && count < bestCount)) {
       bestCount = count;
       bestRelativeError = relativeError;
     }
   }
-  return bestCount || Math.max(1, Math.round(ratio));
+  // If no count falls inside the confidence band, require at least the same
+  // minimum per-part area before increasing the estimate.
+  return bestCount || Math.max(1, Math.floor(ratio / (1 - lowerTolerance)));
 }
 
 function findSmallNoiseComponents(components, targetWidth) {
@@ -932,9 +932,9 @@ function selectClosing(source, width, height, targetWidth, minArea) {
   const baseline = removeIsolatedPixels(source, width, height);
   const baselineStats = componentStats(baseline, width, height, minArea);
   // Reflection-gap correction already reconnects shallow breaks before
-  // thresholding. Keep binary closing small so its dilation does not merge
-  // neighboring parts; use at most a 2px radius for the remaining tiny gaps.
-  const maxRadius = Math.max(1, Math.min(2, Math.ceil(Math.max(3, targetWidth) * 0.06)));
+  // thresholding. Limit binary closing to a single pixel so it repairs only
+  // tiny breaks without expanding into neighboring parts.
+  const maxRadius = 1;
   let best = { mask: baseline, radius: 0, filledPixels: 0, method: 'none' };
   let previous = { ...best, foreground: baselineStats.foreground, components: baselineStats.components };
   for (let radius = 1; radius <= maxRadius; radius++) {
@@ -942,9 +942,8 @@ function selectClosing(source, width, height, targetWidth, minArea) {
     const stats = componentStats(candidate, width, height, minArea);
     const added = stats.foreground - baselineStats.foreground;
     const growth = added / Math.max(1, baselineStats.foreground);
-    // Reject a radius that substantially inflates the foreground. This is a
-    // tighter guard now that the threshold mask already includes glare repair.
-    if (growth > 0.35) break;
+    // Reject closing when even the one-pixel radius inflates the mask too much.
+    if (growth > 0.2) break;
     const current = { mask: candidate, radius, filledPixels: Math.max(0, added), foreground: stats.foreground, components: stats.components };
     if (added > 0) best = { ...current, method: 'component-count-stability' };
     if (radius > 1 && current.components === previous.components && previous.radius > 0 && previous.filledPixels > 0) {
