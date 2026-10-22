@@ -286,9 +286,14 @@ function detect(rgba, width, height, settings) {
       ? estimateAreaUnits(component.area, unitAreaReference, 0.1, 0.3)
       : 1;
     component.estimatedQuantity = component.areaEstimatedQuantity;
-    // Area determines the quantity. Interior peaks can place those items, but
-    // cannot add extra items when threads, heads, or shadows create false peaks.
-    component.maximumSupportedQuantity = component.areaEstimatedQuantity;
+    // Peaks may recover a small, overlapped count, but area must support each
+    // added item. The stricter 0.75 cap avoids the old 0.82 overcount bias.
+    const peakAreaLimit = unitAreaReference
+      ? Math.floor(component.area / (unitAreaReference * 0.75))
+      : component.areaEstimatedQuantity;
+    component.maximumSupportedQuantity = component.autoNoise
+      ? 0
+      : Math.max(component.areaEstimatedQuantity, peakAreaLimit);
   }
 
   // Show only shadow patches that sit between or around a group of at least
@@ -366,9 +371,13 @@ function detect(rgba, width, height, settings) {
   const buckets = new Map();
   const referenceMajorAxis = reference ? Number(reference.majorAxis) : firstPartComponent && firstPartComponent.majorAxis;
   const referenceMinorAxis = reference ? Number(reference.minorAxis) : firstPartComponent && firstPartComponent.minorAxis;
-  const minSeparation = Math.max(10, referenceMinorAxis ? referenceMinorAxis * 0.9 : targetWidth * 0.7);
+  const minSeparation = Math.max(
+    10,
+    referenceMinorAxis ? referenceMinorAxis * 1.25 : targetWidth * 0.8,
+    referenceMajorAxis ? referenceMajorAxis * 0.4 : 0
+  );
   const minSeparationSquared = minSeparation * minSeparation;
-  const minPeakRadius = Math.max(2, referenceMinorAxis ? referenceMinorAxis * 0.36 : targetWidth * 0.22);
+  const minPeakRadius = Math.max(2, referenceMinorAxis ? referenceMinorAxis * 0.45 : targetWidth * 0.27);
   for (const candidate of candidates) {
     const component = components[candidate.label];
     if (!component || component.area < minArea || component.autoNoise) continue;
@@ -398,9 +407,9 @@ function detect(rgba, width, height, settings) {
   for (let label = 1; label < components.length; label++) {
     const component = components[label];
     if (!component || component.autoNoise) continue;
-    // Local peaks help place each counted part but cannot increase the
-    // area-derived quantity on their own.
-    component.estimatedQuantity = component.areaEstimatedQuantity || 1;
+    const areaQuantity = component.areaEstimatedQuantity || 1;
+    const peakSupportedQuantity = Math.min(component.maximumSupportedQuantity || areaQuantity, component.peaks.length);
+    component.estimatedQuantity = Math.max(areaQuantity, peakSupportedQuantity);
   }
 
   const detections = [];

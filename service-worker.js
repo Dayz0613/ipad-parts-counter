@@ -1,10 +1,10 @@
-const CACHE_NAME = 'parts-counter-shell-v38';
+const CACHE_NAME = 'parts-counter-shell-v39';
 const SHELL_FILES = [
   './',
   './index.html',
   './styles.css?v=8',
-  './app.js?v=38',
-  './detector-worker.js?v=38',
+  './app.js?v=39',
+  './detector-worker.js?v=39',
   './manifest.webmanifest',
   './icon.svg',
   './icon-192.png',
