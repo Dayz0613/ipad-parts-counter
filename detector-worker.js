@@ -286,14 +286,20 @@ function detect(rgba, width, height, settings) {
       ? estimateAreaUnits(component.area, unitAreaReference, 0.1, 0.3)
       : 1;
     component.estimatedQuantity = component.areaEstimatedQuantity;
-    // Peaks may recover a small, overlapped count, but area must support each
-    // added item. The stricter 0.75 cap avoids the old 0.82 overcount bias.
+    const areaQuantity = component.areaEstimatedQuantity || 1;
+    const areaPerEstimatedPart = unitAreaReference
+      ? component.area / (unitAreaReference * areaQuantity)
+      : 1;
+    // Use peaks to recover overlap only in larger connected groups whose area
+    // still supports more parts. This keeps single parts and small groups from
+    // gaining false extra detections when their interior has multiple ridges.
     const peakAreaLimit = unitAreaReference
       ? Math.floor(component.area / (unitAreaReference * 0.75))
       : component.areaEstimatedQuantity;
+    const allowPeakRecovery = areaQuantity >= 4 && areaPerEstimatedPart > 1.03;
     component.maximumSupportedQuantity = component.autoNoise
       ? 0
-      : Math.max(component.areaEstimatedQuantity, peakAreaLimit);
+      : allowPeakRecovery ? Math.max(areaQuantity, peakAreaLimit) : areaQuantity;
   }
 
   // Show only shadow patches that sit between or around a group of at least
@@ -338,7 +344,7 @@ function detect(rgba, width, height, settings) {
     }
   }
 
-  const minPeakDistance = Math.max(1.1, targetWidth * 0.18) * 3;
+  const minPeakDistance = Math.max(1.1, targetWidth * 0.16) * 3;
   const candidates = [];
   let candidateLimitReached = false;
   for (let y = 1; y < height - 1; y++) {
@@ -373,11 +379,11 @@ function detect(rgba, width, height, settings) {
   const referenceMinorAxis = reference ? Number(reference.minorAxis) : firstPartComponent && firstPartComponent.minorAxis;
   const minSeparation = Math.max(
     10,
-    referenceMinorAxis ? referenceMinorAxis * 1.25 : targetWidth * 0.8,
-    referenceMajorAxis ? referenceMajorAxis * 0.4 : 0
+    referenceMinorAxis ? referenceMinorAxis * 0.85 : targetWidth * 0.45,
+    referenceMajorAxis ? referenceMajorAxis * 0.3 : 0
   );
   const minSeparationSquared = minSeparation * minSeparation;
-  const minPeakRadius = Math.max(2, referenceMinorAxis ? referenceMinorAxis * 0.45 : targetWidth * 0.27);
+  const minPeakRadius = Math.max(1.5, referenceMinorAxis ? referenceMinorAxis * 0.3 : targetWidth * 0.18);
   for (const candidate of candidates) {
     const component = components[candidate.label];
     if (!component || component.area < minArea || component.autoNoise) continue;
