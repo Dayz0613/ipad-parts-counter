@@ -91,7 +91,7 @@
 
   function registerWorker() {
     try {
-      worker = new Worker('./detector-worker.js?v=34');
+      worker = new Worker('./detector-worker.js?v=35');
       worker.addEventListener('message', (event) => {
         const { jobId, result, error } = event.data || {};
         if (jobId !== activeJob) return;
@@ -127,7 +127,7 @@
         els.exportButton.disabled = false;
         const level = result.polarity === 'dark' ? '暗い部品' : '明るい部品';
         const referenceNote = result.referenceUsed
-          ? ` · 選択形状を基準（面積 ${Math.round(result.referenceUsed.area).toLocaleString()} px²・${result.localThreshold ? '局所コントラスト二値化' : '明暗方向と面積比に反映'}）`
+          ? ` · 選択形状を基準（面積 ${Math.round(result.countReferenceArea || result.referenceUsed.area).toLocaleString()} px²${result.referenceAreaRecalibrated ? '・現画像から再推定' : ''}・${result.localThreshold ? '局所コントラスト二値化' : '明暗方向と面積比に反映'}）`
           : '';
         const countReferenceLabel = result.referenceUsed
           ? '選択した基準部品'
@@ -659,7 +659,7 @@
       els.offlineText.textContent = 'HTTPSで開くとオフライン利用可';
       return;
     }
-    navigator.serviceWorker.register('./service-worker.js?v=34').then(() => navigator.serviceWorker.ready).then(() => {
+    navigator.serviceWorker.register('./service-worker.js?v=35').then(() => navigator.serviceWorker.ready).then(() => {
       els.offlineState.classList.add('ready');
       els.offlineText.textContent = 'オフライン利用の準備OK';
     }).catch(() => {

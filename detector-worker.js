@@ -262,19 +262,29 @@ function detect(rgba, width, height, settings) {
     }
   }
   const countableComponents = components.slice(1).filter((component) => component && !component.autoNoise);
+  const imageAreaReference = selectAreaReference(countableComponents, targetWidth);
   const areaReference = reference
     ? { area: Number(reference.area), component: null, method: 'selected-shape' }
-    : selectAreaReference(countableComponents, targetWidth);
+    : imageAreaReference;
+  const referenceMatchesImage = reference && imageAreaReference.component &&
+    Math.abs(Math.log(Math.max(0.01, reference.aspect || 1) / Math.max(0.01, imageAreaReference.component.aspect || 1))) < 0.35 &&
+    Math.abs(Number(reference.solidity || 0) - imageAreaReference.component.solidity) < 0.2;
   // Only use an auto-selected component as the one-part shape when the same
   // shape/area mode contains several plausible examples. A lone smallest blob
   // may be a fragment or a touching group and must not become the reference.
   const firstPartComponent = areaReference.component;
-  const unitAreaReference = reference ? Number(reference.area) : areaReference.area;
+  // A stored reference can come from an older, thinner binary mask. When the
+  // current image has repeated matching single-part shapes, refresh only its
+  // area from the current mask while retaining the user's selected shape.
+  const unitAreaReference = reference
+    ? (referenceMatchesImage ? imageAreaReference.area : Number(reference.area))
+    : areaReference.area;
+  const referenceAreaRecalibrated = !!referenceMatchesImage;
   for (let label = 1; label < components.length; label++) {
     const component = components[label];
     if (!component) continue;
     component.areaEstimatedQuantity = component.autoNoise ? 0 : unitAreaReference
-      ? estimateAreaUnits(component.area, unitAreaReference, 0.2, 0.3)
+      ? estimateAreaUnits(component.area, unitAreaReference, 0.3, 0.4)
       : 1;
     component.estimatedQuantity = component.areaEstimatedQuantity;
     // Area alone can understate a group when silhouettes overlap. Permit
@@ -282,7 +292,7 @@ function detect(rgba, width, height, settings) {
     // the total visible area can still plausibly support the extra item.
     component.maximumSupportedQuantity = component.autoNoise || !unitAreaReference
       ? component.areaEstimatedQuantity
-      : Math.max(component.areaEstimatedQuantity, Math.floor(component.area / (unitAreaReference * 0.8)));
+      : Math.max(component.areaEstimatedQuantity, Math.floor(component.area / (unitAreaReference * 0.7)));
   }
 
   // Show only shadow patches that sit between or around a group of at least
@@ -503,6 +513,7 @@ function detect(rgba, width, height, settings) {
     firstPartArea: areaReference.component ? areaReference.component.area : null,
     countReferenceArea: unitAreaReference || null,
     countReferenceMethod: areaReference.method,
+    referenceAreaRecalibrated,
     threshold,
     polarity: partPolarity,
     autoThresholdUsed: automatic,
