@@ -374,40 +374,83 @@ function detect(rgba, width, height, settings) {
   }
   candidates.sort((a, b) => b.distance - a.distance);
 
-  const buckets = new Map();
   const referenceMajorAxis = reference ? Number(reference.majorAxis) : firstPartComponent && firstPartComponent.majorAxis;
   const referenceMinorAxis = reference ? Number(reference.minorAxis) : firstPartComponent && firstPartComponent.minorAxis;
+  const referenceAspect = reference ? Number(reference.aspect) : firstPartComponent && firstPartComponent.aspect;
   const minSeparation = Math.max(
     10,
     referenceMinorAxis ? referenceMinorAxis * 0.85 : targetWidth * 0.45,
     referenceMajorAxis ? referenceMajorAxis * 0.3 : 0
   );
-  const minSeparationSquared = minSeparation * minSeparation;
-  const minPeakRadius = Math.max(1.5, referenceMinorAxis ? referenceMinorAxis * 0.3 : targetWidth * 0.18);
+  // Keep narrow shafts eligible as seeds; a larger cutoff over-favors broad
+  // heads and can leave several peaks on the same screw in a touching group.
+  const minPeakRadius = Math.max(1.25, referenceMinorAxis ? referenceMinorAxis * 0.2 : targetWidth * 0.14);
+  const minimumSeedSpacing = Math.max(
+    minSeparation,
+    (referenceMajorAxis || targetWidth * 2.8) * 0.8
+  );
+  const candidatesByLabel = new Map();
+  const broadHubsByLabel = new Map();
   for (const candidate of candidates) {
     const component = components[candidate.label];
     if (!component || component.area < minArea || component.autoNoise) continue;
-    const maximumPerComponent = component.maximumSupportedQuantity || 1;
     if (candidate.distance / 3 < minPeakRadius) continue;
-    const cellX = Math.floor(candidate.x / minSeparation);
-    const cellY = Math.floor(candidate.y / minSeparation);
-    let crowded = false;
-    for (let oy = -1; oy <= 1 && !crowded; oy++) {
-      for (let ox = -1; ox <= 1 && !crowded; ox++) {
-        const near = buckets.get(`${candidate.label}:${cellX + ox}:${cellY + oy}`);
-        if (!near) continue;
-        for (const point of near) {
+    const elongatedGroup = (component.maximumSupportedQuantity || 1) > 1 && Number(referenceAspect) > 2;
+    const broadHeadLimit = Math.max(minPeakRadius * 1.5, (referenceMinorAxis || targetWidth) * 0.6);
+    if (elongatedGroup && candidate.distance / 3 > broadHeadLimit) {
+      const existingHub = broadHubsByLabel.get(candidate.label);
+      if (!existingHub || candidate.distance > existingHub.distance) broadHubsByLabel.set(candidate.label, candidate);
+      continue;
+    }
+    if (!candidatesByLabel.has(candidate.label)) candidatesByLabel.set(candidate.label, []);
+    candidatesByLabel.get(candidate.label).push(candidate);
+  }
+
+  // Greedy spatial coverage: choose the strongest interior peak first, then
+  // favor peaks farthest from those already selected. A radius-only ranking
+  // can spend every marker on ridges of one screw in a connected pile.
+  for (let label = 1; label < components.length; label++) {
+    const component = components[label];
+    if (!component || component.autoNoise) continue;
+    const maximumPerComponent = component.maximumSupportedQuantity || 1;
+    let remaining = candidatesByLabel.get(label) || [];
+    const broadHub = broadHubsByLabel.get(label);
+    if (broadHub && Number(referenceAspect) > 2) {
+      const exclusionRadius = Math.max((referenceMinorAxis || targetWidth) * 0.75, minSeparation * 0.65);
+      const exclusionRadiusSquared = exclusionRadius * exclusionRadius;
+      remaining = remaining.filter((candidate) => {
+        const dx = candidate.x - broadHub.x;
+        const dy = candidate.y - broadHub.y;
+        return dx * dx + dy * dy >= exclusionRadiusSquared;
+      });
+    }
+    while (component.peaks.length < maximumPerComponent && remaining.length) {
+      let bestIndex = -1;
+      let bestSeparation = -1;
+      let bestRadius = -1;
+      for (let index = 0; index < remaining.length; index++) {
+        const candidate = remaining[index];
+        let nearestSquared = Infinity;
+        for (const point of component.peaks) {
           const dx = point.x - candidate.x;
           const dy = point.y - candidate.y;
-          if (dx * dx + dy * dy < minSeparationSquared) { crowded = true; break; }
+          nearestSquared = Math.min(nearestSquared, dx * dx + dy * dy);
+        }
+        if (component.peaks.length && nearestSquared < minimumSeedSpacing * minimumSeedSpacing) continue;
+        const radius = candidate.distance / 3;
+        const betterCandidate = component.peaks.length
+          ? nearestSquared > bestSeparation || (nearestSquared === bestSeparation && radius > bestRadius)
+          : radius > bestRadius;
+        if (betterCandidate) {
+          bestIndex = index;
+          bestSeparation = nearestSquared;
+          bestRadius = radius;
         }
       }
+      if (bestIndex < 0) break;
+      const [candidate] = remaining.splice(bestIndex, 1);
+      component.peaks.push({ x: candidate.x, y: candidate.y, radius: candidate.distance / 3 });
     }
-    if (crowded || component.peaks.length >= maximumPerComponent) continue;
-    component.peaks.push({ x: candidate.x, y: candidate.y, radius: candidate.distance / 3 });
-    const key = `${candidate.label}:${cellX}:${cellY}`;
-    if (!buckets.has(key)) buckets.set(key, []);
-    buckets.get(key).push({ x: candidate.x, y: candidate.y });
   }
 
   for (let label = 1; label < components.length; label++) {
@@ -471,18 +514,47 @@ function detect(rgba, width, height, settings) {
       localPeakCount: component.peaks.length,
       localPeakPositions: component.peaks.map(({ x, y }) => ({ x, y }))
     });
+    // Keep one location on the detected foreground for every part. A distance
+    // peak is a safer anchor than the area centroid for a single part because
+    // attached shadow pixels can pull the centroid off the screw itself.
     const centers = estimatedQuantity === 1
-      ? [{ x: component.cx, y: component.cy }]
+      ? [component.peaks[0] || nearestComponentPixel(component.cx, component.cy, label, width, labels, component) || { x: component.cx, y: component.cy }]
       : component.peaks.slice(0, estimatedQuantity);
     if (centers.length < estimatedQuantity) {
-      centers.length = 0;
       const angle = component.angle * Math.PI / 180;
       const templateLength = Math.max(targetWidth, Number(expectedShape && expectedShape.majorAxis) || targetWidth * 2.8);
       const spread = Math.min(component.majorAxis * 0.72, templateLength * 0.55 * (estimatedQuantity - 1));
       const spacing = spread / Math.max(1, estimatedQuantity - 1);
+      const axisProposals = [];
       for (let i = 0; i < estimatedQuantity; i++) {
         const offset = (i - (estimatedQuantity - 1) / 2) * spacing;
-        centers.push({ x: component.cx + Math.cos(angle) * offset, y: component.cy + Math.sin(angle) * offset });
+        axisProposals.push({ x: component.cx + Math.cos(angle) * offset, y: component.cy + Math.sin(angle) * offset });
+      }
+      // Do not discard well-supported peaks just because a merged group has
+      // fewer peaks than its area estimate. Fill only the missing positions,
+      // snapping each fallback to this component's actual foreground mask.
+      const snappedProposals = axisProposals.map((proposal) =>
+        nearestComponentPixel(proposal.x, proposal.y, label, width, labels, component)
+      ).filter(Boolean);
+      for (const minimumSpacing of [minimumSeedSpacing, minimumSeedSpacing * 0.65, 1.25]) {
+        for (const point of snappedProposals) {
+          if (centers.length >= estimatedQuantity) break;
+          const crowded = centers.some((center) => {
+            const dx = center.x - point.x;
+            const dy = center.y - point.y;
+            return dx * dx + dy * dy < minimumSpacing * minimumSpacing;
+          });
+          if (!crowded) centers.push(point);
+        }
+        // If the axis guesses collapse onto the same few pixels, spread the
+        // remaining uncertain anchors over foreground at this spacing before
+        // relaxing it. This avoids background markers and limits duplicates.
+        while (centers.length < estimatedQuantity) {
+          const point = farthestComponentPixel(label, width, labels, component, centers, minimumSpacing);
+          if (!point) break;
+          centers.push(point);
+        }
+        if (centers.length >= estimatedQuantity) break;
       }
     }
     for (let partIndex = 0; partIndex < estimatedQuantity; partIndex++) {
@@ -947,6 +1019,53 @@ function countForeground(mask) {
   let total = 0;
   for (let i = 0; i < mask.length; i++) total += mask[i];
   return total;
+}
+
+function nearestComponentPixel(x, y, label, width, labels, component) {
+  const height = labels.length / width;
+  const pixelX = Math.max(0, Math.min(width - 1, Math.round(x)));
+  const pixelY = Math.max(0, Math.min(height - 1, Math.round(y)));
+  if (labels[pixelY * width + pixelX] === label) return { x: pixelX, y: pixelY };
+
+  let best = null;
+  let bestDistance = Infinity;
+  for (let py = component.minY; py <= component.maxY; py++) {
+    const row = py * width;
+    for (let px = component.minX; px <= component.maxX; px++) {
+      if (labels[row + px] !== label) continue;
+      const dx = px - x;
+      const dy = py - y;
+      const distance = dx * dx + dy * dy;
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = { x: px, y: py };
+      }
+    }
+  }
+  return best;
+}
+
+function farthestComponentPixel(label, width, labels, component, centers, minimumSpacing) {
+  let best = null;
+  let bestDistance = 0;
+  for (let y = component.minY; y <= component.maxY; y++) {
+    const row = y * width;
+    for (let x = component.minX; x <= component.maxX; x++) {
+      if (labels[row + x] !== label) continue;
+      let nearestDistance = Infinity;
+      for (const center of centers) {
+        const dx = x - center.x;
+        const dy = y - center.y;
+        const distance = dx * dx + dy * dy;
+        if (distance < nearestDistance) nearestDistance = distance;
+      }
+      if (nearestDistance > bestDistance) {
+        bestDistance = nearestDistance;
+        best = { x, y };
+      }
+    }
+  }
+  return bestDistance >= minimumSpacing * minimumSpacing ? best : null;
 }
 
 // Estimate enclosed holes from the original threshold mask before morphology
