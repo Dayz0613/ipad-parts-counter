@@ -131,11 +131,10 @@ function detect(rgba, width, height, settings) {
       }
     }
   }
-  // Automatically infer the closing radius from the estimated part width.
+  // Keep neighboring parts separate by skipping post-threshold closing.
   const minArea = Math.max(1, Number(settings.minArea) || 12);
-  const closing = selectClosing(thresholdMask, width, height, targetWidth, minArea);
-  // Fill enclosed background pockets so the part interior becomes one solid
-  // foreground region after closing has sealed narrow openings.
+  const closing = selectClosing(thresholdMask, width, height);
+  // Fill enclosed background pockets without joining neighboring components.
   const filledMask = fillEnclosedHoles(closing.mask, width, height);
   // Remove isolated one-pixel responses after filling; the configurable minimum
   // area below removes larger speckle clusters.
@@ -284,15 +283,12 @@ function detect(rgba, width, height, settings) {
     const component = components[label];
     if (!component) continue;
     component.areaEstimatedQuantity = component.autoNoise ? 0 : unitAreaReference
-      ? estimateAreaUnits(component.area, unitAreaReference, 0.18, 0.3)
+      ? estimateAreaUnits(component.area, unitAreaReference, 0.1, 0.3)
       : 1;
     component.estimatedQuantity = component.areaEstimatedQuantity;
-    // Area alone can understate a group when silhouettes overlap. Permit
-    // strong, separated interior peaks to raise the estimate, but only while
-    // the total visible area can still plausibly support the extra item.
-    component.maximumSupportedQuantity = component.autoNoise || !unitAreaReference
-      ? component.areaEstimatedQuantity
-      : Math.max(component.areaEstimatedQuantity, Math.floor(component.area / (unitAreaReference * 0.82)));
+    // Area determines the quantity. Interior peaks can place those items, but
+    // cannot add extra items when threads, heads, or shadows create false peaks.
+    component.maximumSupportedQuantity = component.areaEstimatedQuantity;
   }
 
   // Show only shadow patches that sit between or around a group of at least
@@ -402,13 +398,9 @@ function detect(rgba, width, height, settings) {
   for (let label = 1; label < components.length; label++) {
     const component = components[label];
     if (!component || component.autoNoise) continue;
-    const areaQuantity = component.areaEstimatedQuantity || 1;
-    const maximumSupportedQuantity = component.maximumSupportedQuantity || areaQuantity;
-    const peakSupportedQuantity = Math.min(maximumSupportedQuantity, component.peaks.length);
-    // Do not invent another item from the bounding-box shape alone. Contact
-    // shadows can make a merged component look large; an extra count needs
-    // either enough area or a distinct interior peak to support it.
-    component.estimatedQuantity = Math.max(areaQuantity, peakSupportedQuantity);
+    // Local peaks help place each counted part but cannot increase the
+    // area-derived quantity on their own.
+    component.estimatedQuantity = component.areaEstimatedQuantity || 1;
   }
 
   const detections = [];
@@ -835,9 +827,12 @@ function estimateAreaUnits(area, unitArea, lowerTolerance, upperTolerance) {
   for (let count = 1; count <= maxUnits; count++) {
     const perUnitRatio = ratio / count;
     if (perUnitRatio < 1 - lowerTolerance || perUnitRatio > 1 + upperTolerance) continue;
-    // Resolve equally plausible counts conservatively. Threshold repair can
-    // enlarge silhouettes, so an ambiguous area should not favor extra parts.
-    const relativeError = Math.abs(perUnitRatio - 1);
+    // Penalize counts that need a smaller-than-reference area per item. This
+    // avoids choosing an extra part just because a larger count is numerically
+    // closer after thresholding has inflated the combined silhouette.
+    const relativeError = perUnitRatio < 1
+      ? (1 - perUnitRatio) * 1.8
+      : perUnitRatio - 1;
     if (relativeError < bestRelativeError - 1e-9 || (Math.abs(relativeError - bestRelativeError) <= 1e-9 && count < bestCount)) {
       bestCount = count;
       bestRelativeError = relativeError;
@@ -925,33 +920,12 @@ function findRepeatedAreaBand(components) {
   return areaBands[0] || { members: [], area: 0 };
 }
 
-// Morphological closing (dilation followed by erosion) seals narrow gaps in a
-// part's binary silhouette. Kernel size is inferred from the estimated part
-// width, and enclosed background pockets are filled afterward.
-function selectClosing(source, width, height, targetWidth, minArea) {
+// Prepare the threshold mask for counting. Post-threshold dilation and erosion
+// are disabled because they bridged adjacent shafts and heads.
+function selectClosing(source, width, height) {
   const baseline = removeIsolatedPixels(source, width, height);
-  const baselineStats = componentStats(baseline, width, height, minArea);
-  // Reflection-gap correction already reconnects shallow breaks before
-  // thresholding. Limit binary closing to a single pixel so it repairs only
-  // tiny breaks without expanding into neighboring parts.
-  const maxRadius = 1;
-  let best = { mask: baseline, radius: 0, filledPixels: 0, method: 'none' };
-  let previous = { ...best, foreground: baselineStats.foreground, components: baselineStats.components };
-  for (let radius = 1; radius <= maxRadius; radius++) {
-    const candidate = removeIsolatedPixels(closeMask(source, width, height, radius), width, height);
-    const stats = componentStats(candidate, width, height, minArea);
-    const added = stats.foreground - baselineStats.foreground;
-    const growth = added / Math.max(1, baselineStats.foreground);
-    // Reject closing when even the one-pixel radius inflates the mask too much.
-    if (growth > 0.2) break;
-    const current = { mask: candidate, radius, filledPixels: Math.max(0, added), foreground: stats.foreground, components: stats.components };
-    if (added > 0) best = { ...current, method: 'component-count-stability' };
-    if (radius > 1 && current.components === previous.components && previous.radius > 0 && previous.filledPixels > 0) {
-      return { mask: previous.mask, radius: previous.radius, filledPixels: previous.filledPixels, method: 'component-count-stability' };
-    }
-    previous = current;
-  }
-  return { mask: best.mask, radius: best.radius, filledPixels: best.filledPixels, method: best.method };
+  // Skip dilation and erosion: they were bridging adjacent shafts and heads.
+  return { mask: baseline, radius: 0, filledPixels: 0, method: 'disabled' };
 }
 
 function countForeground(mask) {

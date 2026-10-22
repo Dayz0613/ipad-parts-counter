@@ -69,7 +69,7 @@
           <div class="preview-switch" role="group" aria-label="画像処理段階">
             <button class="preview-button active" id="originalView" type="button" aria-pressed="true">カラー写真</button>
             <button class="preview-button" id="binaryView" type="button" aria-pressed="false" disabled>二値画像</button>
-            <button class="preview-button" id="cleanedView" type="button" aria-pressed="false" disabled>膨張収縮後</button>
+            <button class="preview-button" id="cleanedView" type="button" aria-pressed="false" disabled>面積フィルター後</button>
           </div>
           <div class="shadow-preview-toggle">
             <label class="check-row"><input id="shadowRegionsToggle" type="checkbox" checked disabled><span>複数部品の影候補を赤枠で表示</span></label>
@@ -159,6 +159,6 @@
     </main>
     <footer class="app-footer"><span>部品カウンター MVP</span><span>AIなし · 端末内画像処理</span></footer>
   </div>
-  <script src="./app.js?v=37" defer></script>
+  <script src="./app.js?v=38" defer></script>
 </body>
 </html>
